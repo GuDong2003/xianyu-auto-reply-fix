@@ -248,14 +248,66 @@ class AIReplyEngine:
             raise Exception(f"Gemini API 响应格式错误: {result}")
 
     def _call_openai_api(self, client: OpenAI, settings: dict, messages: list, max_tokens: int = 100, temperature: float = 0.7) -> str:
-        """调用OpenAI兼容API"""
+        """调用OpenAI兼容API：优先Responses，失败时回退到Chat Completions"""
+        model_name = settings['model_name']
+
+        # 优先使用OpenAI官方推荐的Responses API
+        try:
+            response = client.responses.create(
+                model=model_name,
+                input=messages,
+                max_output_tokens=max_tokens,
+                temperature=temperature
+            )
+
+            output_text = getattr(response, "output_text", None)
+            if output_text and output_text.strip():
+                return output_text.strip()
+
+            # 兼容部分OpenAI兼容服务：可能没有output_text快捷字段
+            output = getattr(response, "output", None)
+            if output:
+                text_parts = []
+                for item in output:
+                    if getattr(item, "type", None) != "message":
+                        continue
+                    for content in getattr(item, "content", []) or []:
+                        text = getattr(content, "text", None)
+                        if text:
+                            text_parts.append(text)
+                if text_parts:
+                    return "".join(text_parts).strip()
+
+            raise ValueError("Responses API返回中未找到可用文本")
+        except Exception as e:
+            logger.warning(f"Responses API调用失败，回退chat.completions: {e}")
+
+        # 回退到传统Chat Completions，兼容旧版/第三方OpenAI兼容接口
         response = client.chat.completions.create(
-            model=settings['model_name'],
+            model=model_name,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature
         )
-        return response.choices[0].message.content.strip()
+
+        content = response.choices[0].message.content
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text")
+                    if text:
+                        parts.append(text)
+                else:
+                    text = getattr(part, "text", None)
+                    if text:
+                        parts.append(text)
+            if parts:
+                return "".join(parts).strip()
+
+        raise ValueError("chat.completions返回中未找到可用文本")
 
     def is_ai_enabled(self, cookie_id: str) -> bool:
         """检查指定账号是否启用AI回复"""

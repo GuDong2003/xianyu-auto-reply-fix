@@ -14,6 +14,11 @@ from PIL import Image, ImageDraw, ImageFont
 from typing import List, Tuple, Dict, Optional, Any
 from loguru import logger
 
+def get_local_timestamp() -> str:
+    """获取本地时间字符串，用于替换SQLite的CURRENT_TIMESTAMP（UTC时间）"""
+    logger.info(f"本地时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
 class DBManager:
     """SQLite数据库管理，持久化存储Cookie和关键字"""
     
@@ -5883,7 +5888,8 @@ Cookie数量: {cookie_count}
                         update_values.append(cookie_id)
 
                     if update_fields:
-                        update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                        update_fields.append("updated_at = ?")
+                        update_values.append(get_local_timestamp())
                         update_values.append(order_id)
 
                         sql = f"UPDATE orders SET {', '.join(update_fields)} WHERE order_id = ?"
@@ -5893,10 +5899,10 @@ Cookie数量: {cookie_count}
                     # 插入新订单
                     cursor.execute('''
                     INSERT INTO orders (order_id, item_id, buyer_id, buyer_nick, sid, spec_name, spec_value,
-                                      spec_name_2, spec_value_2, quantity, amount, order_status, cookie_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      spec_name_2, spec_value_2, quantity, amount, order_status, cookie_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (order_id, item_id, buyer_id, buyer_nick, sid, spec_name, spec_value,
-                          spec_name_2, spec_value_2, quantity, amount, normalized_order_status or 'unknown', cookie_id))
+                          spec_name_2, spec_value_2, quantity, amount, normalized_order_status or 'unknown', cookie_id, get_local_timestamp(), get_local_timestamp()))
                     logger.info(f"插入新订单: {order_id}")
 
                 self.conn.commit()

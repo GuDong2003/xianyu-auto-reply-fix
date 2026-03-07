@@ -16,7 +16,6 @@ from loguru import logger
 
 def get_local_timestamp() -> str:
     """获取本地时间字符串，用于替换SQLite的CURRENT_TIMESTAMP（UTC时间）"""
-    logger.info(f"本地时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 class DBManager:

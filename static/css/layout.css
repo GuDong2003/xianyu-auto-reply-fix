@@ -289,18 +289,287 @@ body.sidebar-collapsed .main-content {
   display: block;
 }
 
-/* 在线客服页面特殊样式 - 使用flex布局填满高度 */
+/* 在线客服页面 - 三栏布局 */
 #online-im-section.active {
   display: flex;
   flex-direction: column;
   height: calc(100vh);
 }
-
-#online-im-section .content-header {
-  flex-shrink: 0;
-}
-
 #online-im-section .content-body {
   flex: 1;
   overflow: hidden;
+}
+
+/* 三栏通用面板头部 */
+.chat-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid var(--bs-border-color, #dee2e6);
+  flex-shrink: 0;
+  background: var(--bs-body-bg, #fff);
+}
+.chat-panel-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 第1栏：账号列表 */
+.chat-account-list {
+  width: 180px;
+  min-width: 180px;
+  border-right: 1px solid var(--bs-border-color, #dee2e6);
+  display: flex;
+  flex-direction: column;
+  background: var(--bs-body-bg, #fff);
+}
+.chat-account-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--bs-border-color, #f0f0f0);
+  font-size: 13px;
+  transition: background 0.15s;
+  gap: 8px;
+}
+.chat-account-item:hover {
+  background: var(--bs-tertiary-bg, #f8f9fa);
+}
+.chat-account-item.active {
+  background: var(--bs-primary-bg-subtle, #e7f1ff);
+  font-weight: 600;
+}
+.chat-account-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.chat-account-dot.online { background: #28a745; }
+.chat-account-dot.offline { background: #ccc; }
+.chat-account-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 第2栏：会话列表 */
+.chat-session-list {
+  width: 260px;
+  min-width: 260px;
+  border-right: 1px solid var(--bs-border-color, #dee2e6);
+  display: flex;
+  flex-direction: column;
+  background: var(--bs-body-bg, #fff);
+}
+.chat-session-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--bs-border-color, #f0f0f0);
+  transition: background 0.15s;
+}
+.chat-session-item:hover {
+  background: var(--bs-tertiary-bg, #f8f9fa);
+}
+.chat-session-item.active {
+  background: var(--bs-primary-bg-subtle, #e7f1ff);
+  border-left: 3px solid var(--bs-primary, #0d6efd);
+}
+.chat-session-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--bs-secondary-bg, #e9ecef);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  color: var(--bs-secondary-color, #6c757d);
+  flex-shrink: 0;
+  font-size: 13px;
+}
+.chat-session-info {
+  flex: 1;
+  min-width: 0;
+  margin-left: 10px;
+}
+.chat-session-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-session-preview {
+  font-size: 12px;
+  color: var(--bs-secondary-color, #6c757d);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.chat-session-time {
+  font-size: 11px;
+  color: var(--bs-secondary-color, #999);
+  flex-shrink: 0;
+  margin-left: 6px;
+  align-self: flex-start;
+}
+
+/* 第3栏：聊天主区域 */
+.chat-main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bs-body-bg, #fff);
+}
+.chat-active-area {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.chat-msg-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.chat-header {
+  flex-shrink: 0;
+  background: var(--bs-body-bg, #fff);
+}
+.chat-messages-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--bs-tertiary-bg, #f5f5f5);
+}
+.chat-input-area {
+  flex-shrink: 0;
+  background: var(--bs-body-bg, #fff);
+}
+
+/* 右侧回复编辑面板 */
+.chat-reply-panel {
+  width: 320px;
+  min-width: 320px;
+  border-left: 1px solid var(--bs-border-color, #dee2e6);
+  display: flex;
+  flex-direction: column;
+  background: var(--bs-body-bg, #fff);
+}
+.chat-reply-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 关键词行 */
+.kw-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+  align-items: flex-start;
+}
+.kw-row input { font-size: 12px; }
+.kw-row .btn { font-size: 11px; padding: 2px 6px; }
+
+/* 消息气泡 */
+.chat-msg-row {
+  display: flex;
+  margin-bottom: 16px;
+  padding: 0 8px;
+}
+.chat-msg-row.incoming { justify-content: flex-start; }
+.chat-msg-row.outgoing { justify-content: flex-end; }
+/* 包裹气泡和时间的容器 —— 宽度约束在这一层 */
+.chat-msg-row > div {
+  max-width: 65%;
+}
+.chat-msg-bubble {
+  display: inline-block;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+.chat-msg-row.incoming .chat-msg-bubble {
+  background: var(--bs-body-bg, #fff);
+  border: 1px solid var(--bs-border-color, #e0e0e0);
+  border-top-left-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+.chat-msg-row.outgoing .chat-msg-bubble {
+  background: #fff3cd;
+  border: 1px solid #ffe69c;
+  border-top-right-radius: 4px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+.chat-msg-meta {
+  font-size: 11px;
+  color: var(--bs-secondary-color, #999);
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.chat-msg-row.incoming .chat-msg-meta { justify-content: flex-start; }
+.chat-msg-row.outgoing .chat-msg-meta { justify-content: flex-end; }
+.chat-msg-image {
+  max-width: 200px;
+  max-height: 200px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.chat-msg-source {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bs-info-bg-subtle, #e0f7fa);
+  color: var(--bs-info-text-emphasis, #0288d1);
+}
+.chat-date-divider {
+  text-align: center;
+  margin: 12px 0;
+  font-size: 12px;
+  color: var(--bs-secondary-color, #999);
+}
+.chat-date-divider span {
+  background: var(--bs-tertiary-bg, #f5f5f5);
+  padding: 2px 12px;
+  border-radius: 10px;
+}
+
+/* 复用目标商品列表 */
+.copy-target-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.copy-target-item label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  margin: 0;
+}
+
+@media (max-width: 992px) {
+  .chat-account-list { width: 140px; min-width: 140px; }
+  .chat-session-list { width: 200px; min-width: 200px; }
+  .chat-reply-panel { width: 260px; min-width: 260px; }
+  .chat-msg-row > div { max-width: 80%; }
 }

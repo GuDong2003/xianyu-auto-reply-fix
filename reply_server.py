@@ -45,6 +45,7 @@ from utils.notification_dispatcher import (
     resolve_verification_type_label,
 )
 from order_event_hub import order_event_hub, publish_order_update_event
+from chat_event_hub import chat_event_hub, publish_chat_message
 
 from loguru import logger
 
@@ -9740,6 +9741,300 @@ def stream_user_orders(current_user: Dict[str, Any] = Depends(get_current_user))
             'X-Accel-Buffering': 'no',
         }
     )
+
+
+# ==================== 在线客服 Chat API ====================
+
+@app.get('/api/chat/sessions')
+def get_chat_sessions(
+    cookie_id: str = None,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """获取指定账号的会话列表"""
+    try:
+        if not cookie_id:
+            raise HTTPException(status_code=400, detail="缺少 cookie_id 参数")
+        cookie_id = _ensure_cookie_access(cookie_id, current_user)
+        from db_manager import db_manager
+        sessions = db_manager.get_chat_sessions(cookie_id)
+        return {"success": True, "sessions": sessions}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取会话列表失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="获取会话列表失败")
+
+
+@app.get('/api/chat/messages')
+def get_chat_messages(
+    cookie_id: str = None,
+    chat_id: str = None,
+    limit: int = 50,
+    before_id: int = None,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """获取指定会话的消息列表"""
+    try:
+        if not cookie_id or not chat_id:
+            raise HTTPException(status_code=400, detail="缺少 cookie_id 或 chat_id 参数")
+        cookie_id = _ensure_cookie_access(cookie_id, current_user)
+        from db_manager import db_manager
+        messages = db_manager.get_chat_messages(cookie_id, chat_id, limit=min(limit, 100), before_id=before_id)
+        return {"success": True, "messages": messages}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取聊天消息失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="获取聊天消息失败")
+
+
+class ChatSendRequest(BaseModel):
+    cookie_id: str
+    chat_id: str
+    to_user_id: str
+    message: str
+
+
+@app.post('/api/chat/send')
+async def chat_send_message(
+    req: ChatSendRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """在线客服发送消息"""
+    try:
+        cookie_id = _ensure_cookie_access(req.cookie_id, current_user)
+
+        from XianyuAutoAsync import XianyuLive, ConnectionState
+        live_instance = XianyuLive.get_instance(cookie_id)
+        if not live_instance:
+            raise HTTPException(status_code=400, detail="账号未启动")
+        if live_instance.connection_state != ConnectionState.CONNECTED:
+            raise HTTPException(status_code=400, detail="账号WebSocket未连接")
+        if not live_instance.ws:
+            raise HTTPException(status_code=400, detail="WebSocket连接未就绪")
+
+        await _run_live_instance_on_manager_loop(
+            cookie_id,
+            lambda: live_instance.send_msg(
+                live_instance.ws, req.chat_id, req.to_user_id, req.message
+            ),
+            timeout=15,
+        )
+
+        # 保存到数据库并推送SSE
+        from db_manager import db_manager
+        msg_id = db_manager.save_chat_message(
+            cookie_id=cookie_id, chat_id=req.chat_id,
+            sender_id=getattr(live_instance, 'myid', ''),
+            sender_name=cookie_id,
+            content=req.message, content_type=1,
+            direction=1, reply_source='客服'
+        )
+        publish_chat_message(cookie_id, {
+            "msg_id": msg_id, "chat_id": req.chat_id,
+            "sender_id": getattr(live_instance, 'myid', ''),
+            "sender_name": cookie_id,
+            "content": req.message, "content_type": 1,
+            "direction": 1, "reply_source": "客服",
+        })
+
+        return {"success": True, "message": "发送成功", "msg_id": msg_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"客服发送消息失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="发送消息失败")
+
+
+@app.get('/api/chat/stream')
+def stream_chat_messages(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """聊天消息实时事件流"""
+    user_id = current_user['user_id']
+    subscriber = chat_event_hub.subscribe(user_id)
+
+    def event_generator():
+        try:
+            yield format_sse_event('stream.ready', {'type': 'stream.ready', 'timestamp': int(time.time() * 1000)})
+            while True:
+                try:
+                    event = subscriber.get(timeout=25)
+                    yield format_sse_event(event.get('type', 'chat.message'), event)
+                except queue.Empty:
+                    yield format_sse_event('ping', {'type': 'ping', 'timestamp': int(time.time() * 1000)})
+        finally:
+            chat_event_hub.unsubscribe(user_id, subscriber)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+        }
+    )
+
+
+@app.get('/api/chat/accounts')
+def get_chat_accounts(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取当前用户的所有账号列表（在线客服三栏布局用）"""
+    try:
+        user_cookies = _get_user_cookies_map(current_user)
+        accounts = []
+        for cid, cookie_data in user_cookies.items():
+            status = _build_live_runtime_status(cid)
+            detail = db_manager.get_cookie_details(cid) or {}
+            display_name = detail.get('remark') or detail.get('username') or cid
+            accounts.append({
+                'id': cid,
+                'name': display_name,
+                'enabled': db_manager.get_cookie_status(cid),
+                'connected': status.get('connection_state') == 'connected' if status else False,
+            })
+        return {"success": True, "accounts": accounts}
+    except Exception as e:
+        logger.error(f"获取聊天账号列表失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="获取账号列表失败")
+
+
+@app.get('/api/chat/keywords/{cid}/item/{item_id}')
+def get_item_keywords(
+    cid: str, item_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """获取指定商品的关键词列表"""
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        from db_manager import db_manager
+        keywords = db_manager.get_keywords_by_item_id(cid, item_id)
+        # 同时获取 item_replay 表的指定商品回复
+        item_reply = None
+        try:
+            cursor = db_manager.conn.cursor()
+            db_manager._execute_sql(cursor,
+                "SELECT reply_content FROM item_replay WHERE cookie_id = ? AND item_id = ?",
+                (cid, item_id))
+            row = cursor.fetchone()
+            if row:
+                item_reply = row[0]
+        except Exception:
+            pass
+        return {"success": True, "keywords": keywords, "item_reply": item_reply}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取商品关键词失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="获取商品关键词失败")
+
+
+class SaveItemKeywordsRequest(BaseModel):
+    keywords: list  # [{"keyword": str, "reply": str, "type": "text"|"image", "image_url": str|None}]
+    item_reply: Optional[str] = None  # 指定商品回复内容
+
+
+@app.post('/api/chat/keywords/{cid}/item/{item_id}')
+def save_item_keywords(
+    cid: str, item_id: str,
+    req: SaveItemKeywordsRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """保存指定商品的关键词和指定商品回复"""
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        from db_manager import db_manager
+        success = db_manager.save_keywords_for_item(cid, item_id, req.keywords)
+        # 同时更新 item_replay
+        if req.item_reply is not None:
+            try:
+                cursor = db_manager.conn.cursor()
+                if req.item_reply.strip():
+                    db_manager._execute_sql(cursor, """
+                        INSERT INTO item_replay (cookie_id, item_id, reply_content)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(cookie_id, item_id) DO UPDATE SET
+                            reply_content = excluded.reply_content,
+                            updated_at = CURRENT_TIMESTAMP
+                    """, (cid, item_id, req.item_reply))
+                else:
+                    db_manager._execute_sql(cursor,
+                        "DELETE FROM item_replay WHERE cookie_id = ? AND item_id = ?",
+                        (cid, item_id))
+                db_manager.conn.commit()
+            except Exception as ie:
+                logger.error(f"更新指定商品回复失败: {mask_sensitive_text(ie)}")
+        return {"success": success, "count": len(req.keywords)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"保存商品关键词失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="保存商品关键词失败")
+
+
+class CopyKeywordsRequest(BaseModel):
+    source_item_id: str
+    target_item_ids: List[str]
+
+
+@app.post('/api/chat/keywords/{cid}/copy')
+def copy_item_keywords(
+    cid: str,
+    req: CopyKeywordsRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """复制商品关键词和指定商品回复到其他商品"""
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        from db_manager import db_manager
+        results = {}
+        # 获取源商品的指定商品回复
+        source_reply = None
+        try:
+            source_item = db_manager.get_item_replay_by_cookie_and_id(cid, req.source_item_id)
+            if source_item:
+                source_reply = source_item.get('reply_content', '')
+        except Exception:
+            pass
+        for target in req.target_item_ids:
+            if target == req.source_item_id:
+                continue
+            count = db_manager.copy_keywords_to_item(cid, req.source_item_id, target)
+            results[target] = count
+            # 同时复制指定商品回复
+            if source_reply:
+                try:
+                    db_manager.update_item_reply(cid, target, source_reply)
+                except Exception:
+                    pass
+        return {"success": True, "results": results, "total": sum(results.values())}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"复制商品关键词失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="复制商品关键词失败")
+
+
+@app.get('/api/chat/items/{cid}')
+def get_account_items(
+    cid: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """获取账号下的商品列表（用于复制回复的目标选择）"""
+    try:
+        cid = _ensure_cookie_access(cid, current_user)
+        from db_manager import db_manager
+        cursor = db_manager.conn.cursor()
+        db_manager._execute_sql(cursor, """
+            SELECT item_id, item_title FROM item_info
+            WHERE cookie_id = ? ORDER BY item_id
+        """, (cid,))
+        rows = cursor.fetchall()
+        items = [{"item_id": r[0], "item_title": r[1]} for r in rows]
+        return {"success": True, "items": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取商品列表失败: {mask_sensitive_text(e)}")
+        raise HTTPException(status_code=500, detail="获取商品列表失败")
 
 
 @app.delete('/api/orders/{order_id}')

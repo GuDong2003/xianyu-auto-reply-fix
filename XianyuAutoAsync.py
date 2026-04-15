@@ -11330,6 +11330,29 @@ class XianyuLive:
 
         return []
 
+    def _extract_image_url_from_message(self, message: dict) -> Optional[str]:
+        """从消息结构中提取图片URL"""
+        try:
+            message_1 = message.get('1', {})
+            if not isinstance(message_1, dict):
+                return None
+            message_6 = message_1.get('6', {})
+            if not isinstance(message_6, dict):
+                return None
+            message_6_3 = message_6.get('3', {})
+            if not isinstance(message_6_3, dict):
+                return None
+            content_json_str = message_6_3.get('5', '')
+            if content_json_str:
+                import json as _json
+                content_obj = _json.loads(content_json_str)
+                pics = content_obj.get('image', {}).get('pics', [])
+                if pics:
+                    return pics[0].get('url', '')
+        except Exception:
+            pass
+        return None
+
     async def send_heartbeat(self, ws):
         """发送心跳包"""
         # 检查WebSocket连接状态，如果已关闭则不发送
@@ -13532,6 +13555,24 @@ class XianyuLive:
                     # 记录发出的消息
                     msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                     logger.info(f"[{msg_time}] 【{reply_source}发出】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id}): {reply}")
+                    # 保存发出的消息到数据库并推送SSE事件
+                    try:
+                        from db_manager import db_manager as _db
+                        from chat_event_hub import publish_chat_message
+                        _msg_id_db = _db.save_chat_message(
+                            cookie_id=self.cookie_id, chat_id=chat_id,
+                            sender_id=self.myid, sender_name=self.cookie_id,
+                            content=reply, content_type=1,
+                            item_id=item_id, direction=1, reply_source=reply_source
+                        )
+                        publish_chat_message(self.cookie_id, {
+                            "msg_id": _msg_id_db, "chat_id": chat_id,
+                            "sender_id": self.myid, "sender_name": self.cookie_id,
+                            "content": reply, "content_type": 1,
+                            "item_id": item_id, "direction": 1, "reply_source": reply_source,
+                        })
+                    except Exception as _e:
+                        logger.debug(f"保存/推送发出消息失败: {self._safe_str(_e)}")
             else:
                 msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】【系统】未找到匹配的回复规则，不回复")
@@ -14014,6 +14055,26 @@ class XianyuLive:
 
             if send_user_id == self.myid and not is_system_message:
                 logger.info(f"[{msg_time}] 【{self.cookie_id}】[{msg_id}] 【手动发出】 商品({item_id}): {send_message}")
+                # 保存手动发出的消息到数据库并推送SSE事件
+                try:
+                    from db_manager import db_manager as _db
+                    from chat_event_hub import publish_chat_message
+                    _msg_id_db = _db.save_chat_message(
+                        cookie_id=self.cookie_id, chat_id=chat_id,
+                        sender_id=self.myid, sender_name=self.cookie_id,
+                        content=send_message, content_type=content_type,
+                        image_url=self._extract_image_url_from_message(message) if content_type == 2 else None,
+                        item_id=item_id, direction=1, reply_source='手动'
+                    )
+                    publish_chat_message(self.cookie_id, {
+                        "msg_id": _msg_id_db, "chat_id": chat_id,
+                        "sender_id": self.myid, "sender_name": self.cookie_id,
+                        "content": send_message, "content_type": content_type,
+                        "image_url": self._extract_image_url_from_message(message) if content_type == 2 else None,
+                        "item_id": item_id, "direction": 1, "reply_source": "手动",
+                    })
+                except Exception as _e:
+                    logger.debug(f"保存/推送手动消息失败: {self._safe_str(_e)}")
 
                 # 暂停该chat_id的自动回复10分钟
                 pause_manager.pause_chat(chat_id, self.cookie_id)
@@ -14027,6 +14088,26 @@ class XianyuLive:
                 )
             else:
                 logger.info(f"[{msg_time}] 【收到】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id}): {send_message}")
+                # 保存收到的消息到数据库并推送SSE事件
+                try:
+                    from db_manager import db_manager as _db
+                    from chat_event_hub import publish_chat_message
+                    _msg_id_db = _db.save_chat_message(
+                        cookie_id=self.cookie_id, chat_id=chat_id,
+                        sender_id=send_user_id, sender_name=send_user_name,
+                        content=send_message, content_type=content_type,
+                        image_url=self._extract_image_url_from_message(message) if content_type == 2 else None,
+                        item_id=item_id, direction=2
+                    )
+                    publish_chat_message(self.cookie_id, {
+                        "msg_id": _msg_id_db, "chat_id": chat_id,
+                        "sender_id": send_user_id, "sender_name": send_user_name,
+                        "content": send_message, "content_type": content_type,
+                        "image_url": self._extract_image_url_from_message(message) if content_type == 2 else None,
+                        "item_id": item_id, "direction": 2,
+                    })
+                except Exception as _e:
+                    logger.debug(f"保存/推送聊天消息失败: {self._safe_str(_e)}")
                 if message_route == 'user_chat':
                     self.last_user_chat_time = time.time()
 

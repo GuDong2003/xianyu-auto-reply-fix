@@ -2507,59 +2507,102 @@
 
     <!-- 在线客服内容 -->
     <div id="online-im-section" class="content-section">
-      <div class="content-header" style="flex-shrink: 0;">
-        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-          <div>
-            <h2 class="mb-0">
-              <i class="bi bi-headset me-2"></i>
-              在线客服
-            </h2>
-            <p class="text-muted mb-0">内嵌闲鱼IM页面，快速处理客户咨询</p>
+      <div class="content-body p-0" style="flex: 1; overflow: hidden;">
+        <div class="d-flex h-100" id="chatContainer">
+          <!-- 第1栏：账号列表 -->
+          <div class="chat-account-list" id="chatAccountList">
+            <div class="chat-panel-header">
+              <span>账号列表</span>
+              <button class="btn btn-link btn-sm p-0" onclick="refreshChatAccounts()" title="刷新"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+            <div class="chat-panel-body" id="chatAccountsBody">
+              <div class="text-center text-muted py-4 small">加载中...</div>
+            </div>
           </div>
-          <div class="d-flex align-items-center gap-2 flex-wrap">
-            <select class="form-select form-select-sm" id="imAccountSelect" style="width: auto; min-width: 150px;" onchange="onImAccountChange()">
-              <option value="">-- 选择账号 --</option>
-            </select>
-            <!-- 账号密码信息显示在选择框旁边 -->
-            <div id="imAccountInfoBar" class="d-flex flex-column gap-1">
-              <div class="d-flex align-items-center gap-1">
-                <span class="text-muted small">账号:</span>
-                <code id="imDisplayUsername" class="bg-light px-2 py-1 rounded small text-center" style="min-width: 120px; display: inline-block;">-</code>
-                <button class="btn btn-link btn-sm p-0 text-primary" onclick="copyImUsername()" title="复制账号">
-                  <i class="bi bi-clipboard"></i>
-                </button>
-              </div>
-              <div class="d-flex align-items-center gap-1">
-                <span class="text-muted small">密码:</span>
-                <code id="imDisplayPassword" class="bg-light px-2 py-1 rounded small text-center" style="min-width: 120px; display: inline-block;">-</code>
-                <button class="btn btn-link btn-sm p-0 text-primary" onclick="copyImPassword()" title="复制密码">
-                  <i class="bi bi-clipboard"></i>
-                </button>
+          <!-- 第2栏：会话列表 -->
+          <div class="chat-session-list" id="chatSessionList">
+            <div class="chat-panel-header">
+              <span>会话列表</span>
+              <button class="btn btn-link btn-sm p-0" onclick="refreshChatSessions()" title="刷新"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+            <div class="p-2 border-bottom">
+              <input type="text" class="form-control form-control-sm" id="chatSearchInput" placeholder="搜索会话..." oninput="filterChatSessions()">
+            </div>
+            <div class="chat-panel-body" id="chatSessionsBody">
+              <div class="text-center text-muted py-4 small">请先选择账号</div>
+            </div>
+          </div>
+          <!-- 第3栏：聊天区域 -->
+          <div class="chat-main-area" id="chatMainArea">
+            <div class="chat-main-placeholder d-flex flex-column align-items-center justify-content-center h-100 text-muted" id="chatMainPlaceholder">
+              <i class="bi bi-chat-square-text" style="font-size: 3rem;"></i>
+              <p class="mt-2">请选择一个会话查看聊天记录</p>
+            </div>
+            <div class="chat-active-area d-none" id="chatActiveArea">
+              <div class="d-flex h-100">
+                <!-- 左：聊天消息 -->
+                <div class="chat-msg-panel">
+                  <div class="chat-header border-bottom px-3 py-2 d-flex align-items-center justify-content-between">
+                    <div>
+                      <strong id="chatHeaderName">-</strong>
+                      <small class="text-muted ms-2" id="chatHeaderItemId"></small>
+                    </div>
+                    <div class="d-flex gap-1">
+                      <button class="btn btn-sm btn-outline-secondary" onclick="loadMoreChatMessages()" title="加载更多"><i class="bi bi-clock-history"></i></button>
+                      <button class="btn btn-sm btn-outline-primary" onclick="toggleReplyPanel()" title="商品回复" id="btnToggleReply"><i class="bi bi-chat-right-text"></i></button>
+                    </div>
+                  </div>
+                  <div class="chat-messages-area" id="chatMessagesArea"></div>
+                  <div class="chat-input-area border-top p-2">
+                    <div class="d-flex gap-2">
+                      <textarea class="form-control form-control-sm" id="chatInputBox" rows="2" placeholder="输入消息... (Enter发送, Shift+Enter换行)" onkeydown="handleChatInputKeydown(event)"></textarea>
+                      <button class="btn btn-primary btn-sm align-self-end" onclick="sendChatMessage()" id="chatSendBtn" style="min-width: 60px;">发送</button>
+                    </div>
+                  </div>
+                </div>
+                <!-- 右：商品回复编辑面板 -->
+                <div class="chat-reply-panel d-none" id="chatReplyPanel">
+                  <div class="chat-panel-header">
+                    <span>商品回复设置</span>
+                    <button class="btn btn-link btn-sm p-0" onclick="toggleReplyPanel()" title="关闭"><i class="bi bi-x-lg"></i></button>
+                  </div>
+                  <div class="chat-reply-body" id="chatReplyBody">
+                    <div class="p-3">
+                      <!-- 商品信息 -->
+                      <div class="mb-3">
+                        <label class="form-label fw-bold small">当前商品</label>
+                        <div class="input-group input-group-sm">
+                          <span class="input-group-text">ID</span>
+                          <input type="text" class="form-control" id="replyItemId" readonly>
+                        </div>
+                      </div>
+                      <!-- 指定商品回复 -->
+                      <div class="mb-3">
+                        <label class="form-label fw-bold small">指定商品回复 <span class="text-muted fw-normal">(优先级最高)</span></label>
+                        <textarea class="form-control form-control-sm" id="replyItemReply" rows="2" placeholder="输入该商品的固定回复..."></textarea>
+                      </div>
+                      <!-- 商品关键词列表 -->
+                      <div class="mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                          <label class="form-label fw-bold small mb-0">商品关键词</label>
+                          <button class="btn btn-outline-primary btn-sm" onclick="addKeywordRow()" style="font-size:11px;"><i class="bi bi-plus"></i> 添加</button>
+                        </div>
+                        <div id="replyKeywordsList"></div>
+                      </div>
+                      <!-- 保存按钮 -->
+                      <button class="btn btn-primary btn-sm w-100 mb-3" onclick="saveItemKeywords()"><i class="bi bi-check-lg me-1"></i>保存回复设置</button>
+                      <!-- 复用回复 -->
+                      <div class="border-top pt-3">
+                        <label class="form-label fw-bold small">一键复用到其他商品</label>
+                        <div id="copyTargetItems" class="mb-2" style="max-height: 150px; overflow-y: auto;"></div>
+                        <button class="btn btn-outline-success btn-sm w-100" onclick="copyKeywordsToSelected()"><i class="bi bi-files me-1"></i>复制到选中商品</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <button class="btn btn-sm btn-outline-secondary" onclick="loadImAccountList()" title="刷新账号列表">
-              <i class="bi bi-arrow-clockwise"></i>
-            </button>
-            <button class="btn btn-sm btn-outline-success" onclick="refreshImIframe()" title="刷新页面">
-              <i class="bi bi-arrow-repeat"></i> 刷新
-            </button>
-            <button class="btn btn-sm btn-success" onclick="openGoofishImNewWindow()" title="在新窗口打开">
-              <i class="bi bi-box-arrow-up-right"></i> 新窗口
-            </button>
           </div>
-        </div>
-      </div>
-      <div class="content-body p-0" style="flex: 1; overflow: hidden;">
-        <!-- 内嵌闲鱼IM iframe -->
-        <div class="im-iframe-container" style="height: 100%;">
-          <iframe
-            id="goofishImIframe"
-            src="about:blank"
-            data-src="https://www.goofish.com/im"
-            style="width: 100%; height: 100%; border: none;"
-            allow="microphone; camera; clipboard-read; clipboard-write"
-            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
-          ></iframe>
         </div>
       </div>
     </div>

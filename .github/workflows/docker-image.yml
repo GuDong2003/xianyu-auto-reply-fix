@@ -1,0 +1,91 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (e.g., v1.0.0)'
+        required: true
+        default: 'latest'
+  release:
+    types:
+      - published
+
+jobs:
+  build-and-push:
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set tag name
+        id: tag_name
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="latest"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Current tag: ${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR        
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        id: docker_hub_login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+        continue-on-error: true
+
+      - name: Prepare image tags
+        id: image_tags
+        run: |
+          # Convert repository to lowercase (owner/repo)
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          TAG="${{ steps.tag_name.outputs.tag }}"
+          
+          # Build GHCR tags
+          GHCR_TAG="ghcr.io/${REPO_LOWER}:${TAG}"
+          GHCR_LATEST="ghcr.io/${REPO_LOWER}:latest"
+          
+          # Build Docker Hub tags (if needed)
+          DOCKER_HUB_TAGS=""
+          if [ "${{ steps.docker_hub_login.outcome }}" = "success" ]; then
+            REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+            DOCKER_USER="${{ secrets.DOCKER_USERNAME }}"
+            DOCKER_HUB_TAGS="${DOCKER_USER}/${REPO_NAME}:${TAG},${DOCKER_USER}/${REPO_NAME}:latest"
+          fi
+          
+          # Output all tags as a comma-separated list
+          ALL_TAGS="${GHCR_TAG},${GHCR_LATEST}"
+          if [ -n "${DOCKER_HUB_TAGS}" ]; then
+            ALL_TAGS="${ALL_TAGS},${DOCKER_HUB_TAGS}"
+          fi
+          
+          echo "tags=${ALL_TAGS}" >> $GITHUB_OUTPUT
+          echo "GHCR tag: ${GHCR_TAG}"  # Debug output
+
+      - name: Build and push multi-arch images
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.image_tags.outputs.tags }}
+          platforms: linux/amd64,linux/arm64

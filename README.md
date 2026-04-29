@@ -144,7 +144,7 @@ git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
 cd xianyu-auto-reply-fix
 
 # 2. 启动服务
-docker compose up -d --build
+docker compose up -d
 
 # 3. 访问系统
 # http://localhost:9000

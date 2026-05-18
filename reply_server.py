@@ -9391,7 +9391,7 @@ async def _run_order_history_sync_job(job_id: str) -> None:
     user_info = dict(job.get('user_info') or {})
     current_user_id = user_info.get('user_id')
 
-    from utils.order_history_sync import OrderHistoryPageFetcher
+    from utils.order_history_sync import OrderHistoryPageFetcher, OrderHistorySyncError
 
     try:
         utc_start = local_date_to_utc_start(request_data.get('start_date'))
@@ -9457,11 +9457,25 @@ async def _run_order_history_sync_job(job_id: str) -> None:
             live_instance = cookie_manager.manager.get_xianyu_instance(cookie_id) if cookie_manager.manager else None
 
             try:
-                fetch_result = await history_fetcher.fetch_recent_orders(
-                    max_orders=remaining_limit,
-                    utc_start=utc_start,
-                    utc_end_exclusive=utc_end_exclusive,
-                )
+                try:
+                    fetch_result = await history_fetcher.fetch_recent_orders(
+                        max_orders=remaining_limit,
+                        utc_start=utc_start,
+                        utc_end_exclusive=utc_end_exclusive,
+                    )
+                except OrderHistorySyncError as history_exc:
+                    logger.warning(
+                        f"历史订单列表同步跳过账号: cookie_id={cookie_id}, "
+                        f"kind={history_exc.kind}, error={history_exc}"
+                    )
+                    warning_message = str(history_exc)
+                    if history_exc.guidance:
+                        warning_message = f'{warning_message}；处理建议：{history_exc.guidance}'
+                    _append_order_history_sync_warning(job, warning_message)
+                    job['orders_failed'] += 1
+                    job['accounts_completed'] = account_index
+                    continue
+
                 candidates = list(fetch_result.get('orders') or [])
                 scanned_count = int(fetch_result.get('scanned_count') or 0)
                 matched_count = int(fetch_result.get('matched_count') or 0)

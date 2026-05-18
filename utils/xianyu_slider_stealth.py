@@ -576,11 +576,15 @@ class SliderConcurrencyManager:
         if not self._initialized:
             self.max_concurrent = SLIDER_MAX_CONCURRENT  # 从配置文件读取最大并发数
             self.wait_timeout = SLIDER_WAIT_TIMEOUT  # 从配置文件读取等待超时时间
+            self.stale_timeout = max(self.wait_timeout * 3, 180)
             self.active_instances = {}  # 活跃实例
             self.waiting_queue = []  # 等待队列
             self.instance_lock = threading.Lock()
             self._initialized = True
-            logger.info(f"滑块验证并发管理器初始化: 最大并发数={self.max_concurrent}, 等待超时={self.wait_timeout}秒")
+            logger.info(
+                f"滑块验证并发管理器初始化: 最大并发数={self.max_concurrent}, "
+                f"等待超时={self.wait_timeout}秒, 陈旧槽位超时={self.stale_timeout}秒"
+            )
     
     def can_start_instance(self, user_id: str) -> bool:
         """检查是否可以启动新实例"""
@@ -594,6 +598,29 @@ class SliderConcurrencyManager:
             if self._extract_pure_user_id(active_user_id) == pure_user_id:
                 return active_user_id
         return None
+
+    def _cleanup_stale_instances_locked(self) -> int:
+        """清理异常退出后遗留的陈旧槽位，避免后续手动刷新一直等待。"""
+        now = time.time()
+        stale_user_ids = []
+        for active_user_id, active_info in list(self.active_instances.items()):
+            try:
+                start_time = float((active_info or {}).get('start_time') or 0)
+            except Exception:
+                start_time = 0
+            if start_time <= 0 or now - start_time > self.stale_timeout:
+                stale_user_ids.append(active_user_id)
+
+        for active_user_id in stale_user_ids:
+            active_info = self.active_instances.pop(active_user_id, {})
+            pure_user_id = self._extract_pure_user_id(active_user_id)
+            start_time = active_info.get('start_time') if isinstance(active_info, dict) else None
+            age = now - start_time if start_time else 0
+            logger.warning(
+                f"【{pure_user_id}】清理陈旧滑块槽位: active_user_id={active_user_id}, age={age:.1f}s"
+            )
+
+        return len(stale_user_ids)
 
     def _can_start_locked(self, user_id: str) -> bool:
         """在持锁状态下检查是否允许启动实例"""
@@ -609,6 +636,7 @@ class SliderConcurrencyManager:
         
         while time.time() - start_time < timeout:
             with self.instance_lock:
+                self._cleanup_stale_instances_locked()
                 same_account_active = self._find_same_account_active_locked(user_id)
                 if len(self.active_instances) < self.max_concurrent and same_account_active is None:
                     return True
@@ -643,6 +671,7 @@ class SliderConcurrencyManager:
     def register_instance(self, user_id: str, instance):
         """注册实例"""
         with self.instance_lock:
+            self._cleanup_stale_instances_locked()
             if not self._can_start_locked(user_id):
                 return False
             self.active_instances[user_id] = {
@@ -681,12 +710,15 @@ class SliderConcurrencyManager:
     def get_stats(self):
         """获取统计信息"""
         with self.instance_lock:
+            self._cleanup_stale_instances_locked()
             return {
                 'active_count': len(self.active_instances),
                 'max_concurrent': self.max_concurrent,
                 'available_slots': self.max_concurrent - len(self.active_instances),
                 'queue_length': len(self.waiting_queue),
-                'waiting_users': self.waiting_queue.copy()
+                'waiting_users': self.waiting_queue.copy(),
+                'active_users': list(self.active_instances.keys()),
+                'stale_timeout': self.stale_timeout,
             }
 
 # 全局并发管理器实例
@@ -812,19 +844,7 @@ class XianyuSliderStealth:
         # 为每个实例创建独立的临时目录
         self.temp_dir = tempfile.mkdtemp(prefix=f"slider_{user_id}_")
         logger.debug(f"【{self.pure_user_id}】创建临时目录: {self.temp_dir}")
-        
-        # 等待可用槽位（排队机制）
-        logger.info(f"【{self.pure_user_id}】检查并发限制...")
-        if not concurrency_manager.wait_for_slot(self.user_id):
-            stats = concurrency_manager.get_stats()
-            logger.error(f"【{self.pure_user_id}】等待槽位超时，当前活跃: {stats['active_count']}/{stats['max_concurrent']}")
-            raise Exception(f"滑块验证等待槽位超时，请稍后重试")
-        
-        # 注册实例
-        if not concurrency_manager.register_instance(self.user_id, self):
-            raise Exception(f"【{self.pure_user_id}】同账号已有滑块任务正在执行，请稍后重试")
-        stats = concurrency_manager.get_stats()
-        logger.info(f"【{self.pure_user_id}】实例已注册，当前并发: {stats['active_count']}/{stats['max_concurrent']}")
+        self._slider_slot_acquired = False
         
         # 轨迹学习相关属性
         
@@ -856,6 +876,48 @@ class XianyuSliderStealth:
         
         # 保存最后一次使用的轨迹参数（用于分析优化）
         self.last_trajectory_params = {}
+
+    def _acquire_slider_slot(self):
+        """只在真正处理滑块时占用并发槽位。"""
+        if getattr(self, '_slider_slot_acquired', False):
+            return
+
+        logger.info(f"【{self.pure_user_id}】检查滑块并发限制...")
+        if not concurrency_manager.wait_for_slot(self.user_id):
+            stats = concurrency_manager.get_stats()
+            logger.error(
+                f"【{self.pure_user_id}】等待滑块槽位超时，当前活跃: "
+                f"{stats['active_count']}/{stats['max_concurrent']}, "
+                f"活跃任务: {stats.get('active_users', [])}, 等待队列: {stats.get('waiting_users', [])}"
+            )
+            raise Exception(
+                "滑块验证等待槽位超时，请稍后重试；如果刚完成或取消过验证，请等待旧任务释放后再刷新"
+            )
+
+        if not concurrency_manager.register_instance(self.user_id, self):
+            stats = concurrency_manager.get_stats()
+            raise Exception(
+                f"【{self.pure_user_id}】同账号已有滑块任务正在执行，请稍后重试；"
+                f"活跃任务: {stats.get('active_users', [])}"
+            )
+
+        self._slider_slot_acquired = True
+        stats = concurrency_manager.get_stats()
+        logger.info(f"【{self.pure_user_id}】滑块槽位已注册，当前并发: {stats['active_count']}/{stats['max_concurrent']}")
+
+    def _release_slider_slot(self, reason: str = 'done'):
+        """释放滑块并发槽位。"""
+        if not getattr(self, '_slider_slot_acquired', False):
+            return
+        try:
+            concurrency_manager.unregister_instance(self.user_id)
+            stats = concurrency_manager.get_stats()
+            logger.info(
+                f"【{self.pure_user_id}】滑块槽位已释放({reason})，"
+                f"当前并发: {stats['active_count']}/{stats['max_concurrent']}"
+            )
+        finally:
+            self._slider_slot_acquired = False
 
     def _fail_login(self, message: str):
         self.last_login_error = message
@@ -5201,6 +5263,14 @@ class XianyuSliderStealth:
             return False
     
     def solve_slider(self, max_retries: int = 3, fast_mode: bool = False):
+        """处理滑块验证，并把并发槽位占用限制在实际滑块处理期间。"""
+        self._acquire_slider_slot()
+        try:
+            return self._solve_slider_locked(max_retries=max_retries, fast_mode=fast_mode)
+        finally:
+            self._release_slider_slot('solve_slider_finished')
+
+    def _solve_slider_locked(self, max_retries: int = 3, fast_mode: bool = False):
         """处理滑块验证（极速模式 + 自适应策略）
 
         Args:
@@ -5537,9 +5607,7 @@ class XianyuSliderStealth:
         
         # 注销实例（最后执行，确保其他清理完成）
         try:
-            concurrency_manager.unregister_instance(self.user_id)
-            stats = concurrency_manager.get_stats()
-            logger.info(f"【{self.pure_user_id}】实例已注销，当前并发: {stats['active_count']}/{stats['max_concurrent']}，等待队列: {stats['queue_length']}")
+            self._release_slider_slot('close_browser')
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】注销实例时出错: {e}")
         
@@ -7213,9 +7281,7 @@ class XianyuSliderStealth:
 
                 # 释放并发槽位（防止槽位泄漏导致后续任务永远等待）
                 try:
-                    concurrency_manager.unregister_instance(self.user_id)
-                    stats = concurrency_manager.get_stats()
-                    logger.info(f"【{self.pure_user_id}】密码登录结束，已释放并发槽位，当前并发: {stats['active_count']}/{stats['max_concurrent']}")
+                    self._release_slider_slot('password_login_finished')
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】释放并发槽位时出错: {e}")
         
@@ -7231,7 +7297,7 @@ class XianyuSliderStealth:
             self._slider_refresh_mode = previous_slider_refresh_mode
             # 最外层 finally：确保任何退出路径都释放并发槽位
             try:
-                concurrency_manager.unregister_instance(self.user_id)
+                self._release_slider_slot('password_login_outer_finally')
             except Exception:
                 pass
     

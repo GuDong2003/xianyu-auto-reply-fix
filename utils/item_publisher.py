@@ -23,7 +23,7 @@ class ItemPublisher:
     )
     ALLOWED_DELIVERY_CHOICES = {"包邮", "按距离计费", "一口价", "无需邮寄"}
 
-    def __init__(self, cookies_str: str, cookie_id: str = ""):
+    def __init__(self, cookies_str: str, cookie_id: str = "", proxy_config: Optional[Dict[str, Any]] = None):
         cleaned_cookies = str(cookies_str or "").strip()
         if not cleaned_cookies:
             raise ValueError("Cookie 为空，无法发布商品")
@@ -32,6 +32,8 @@ class ItemPublisher:
         self.cookies = trans_cookies(cleaned_cookies)
         self.cookies_str = self._serialize_cookies(self.cookies)
         self.session: Optional[aiohttp.ClientSession] = None
+        self.proxy_config = dict(proxy_config or {})
+        self._http_proxy_url = self._build_http_proxy_url()
 
     async def __aenter__(self):
         await self.create_session()
@@ -44,18 +46,73 @@ class ItemPublisher:
         if self.session:
             return
 
+        connector = None
+        if self._is_socks_proxy():
+            try:
+                from aiohttp_socks import ProxyConnector, ProxyType
+
+                connector = ProxyConnector(
+                    proxy_type=ProxyType.SOCKS5,
+                    host=self.proxy_config.get("proxy_host"),
+                    port=int(self.proxy_config.get("proxy_port") or 0),
+                    username=self.proxy_config.get("proxy_user") or None,
+                    password=self.proxy_config.get("proxy_pass") or None,
+                    rdns=True,
+                )
+            except ImportError:
+                logger.error(f"【{self.cookie_id}】商品发布使用 SOCKS5 代理需要安装 aiohttp-socks")
+
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=40),
+            connector=connector,
             headers={
                 "User-Agent": self.USER_AGENT,
                 "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8,zh-TW;q=0.7,ja;q=0.6",
             },
         )
 
+        if self._http_proxy_url:
+            logger.info(f"【{self.cookie_id}】商品发布服务启用账号代理: {self._masked_proxy_url()}")
+
     async def close_session(self):
         if self.session:
             await self.session.close()
             self.session = None
+
+    def _build_http_proxy_url(self) -> Optional[str]:
+        proxy_type = str(self.proxy_config.get("proxy_type") or "none").strip().lower()
+        proxy_host = str(self.proxy_config.get("proxy_host") or "").strip()
+        proxy_port = self.proxy_config.get("proxy_port") or 0
+        if proxy_type in {"", "none"} or not proxy_host or not proxy_port:
+            return None
+        if proxy_type not in {"http", "https", "socks5"}:
+            return None
+
+        proxy_user = str(self.proxy_config.get("proxy_user") or "").strip()
+        proxy_pass = str(self.proxy_config.get("proxy_pass") or "").strip()
+        auth = ""
+        if proxy_user:
+            auth = proxy_user
+            if proxy_pass:
+                auth += f":{proxy_pass}"
+            auth += "@"
+        return f"{proxy_type}://{auth}{proxy_host}:{proxy_port}"
+
+    def _masked_proxy_url(self) -> str:
+        proxy_type = str(self.proxy_config.get("proxy_type") or "none").strip().lower()
+        proxy_host = str(self.proxy_config.get("proxy_host") or "").strip()
+        proxy_port = self.proxy_config.get("proxy_port") or 0
+        if proxy_type in {"", "none"} or not proxy_host or not proxy_port:
+            return "none"
+        return f"{proxy_type}://{proxy_host}:{proxy_port}"
+
+    def _is_socks_proxy(self) -> bool:
+        return str(self.proxy_config.get("proxy_type") or "").strip().lower() == "socks5"
+
+    def _request_kwargs(self) -> Dict[str, Any]:
+        if not self._http_proxy_url or self._is_socks_proxy():
+            return {}
+        return {"proxy": self._http_proxy_url}
 
     @staticmethod
     def is_success_response(payload: Dict[str, Any]) -> bool:
@@ -213,6 +270,7 @@ class ItemPublisher:
             params=params,
             data=form_data,
             headers=headers,
+            **self._request_kwargs(),
         ) as response:
             self._update_cookies_from_response(response)
             response_text = await response.text()
@@ -521,6 +579,7 @@ class ItemPublisher:
             params=params,
             data={"data": data_val},
             headers=headers,
+            **self._request_kwargs(),
         ) as response:
             self._update_cookies_from_response(response)
             response_text = await response.text()

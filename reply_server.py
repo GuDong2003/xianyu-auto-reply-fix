@@ -9339,7 +9339,8 @@ async def publish_item(
             f"title={cleaned_title}, images={len(image_payloads)}, delivery_choice={delivery_choice}"
         )
 
-        async with ItemPublisher(cookies_str, cleaned_cookie_id) as publisher:
+        proxy_config = db_manager.get_cookie_proxy_config(cleaned_cookie_id)
+        async with ItemPublisher(cookies_str, cleaned_cookie_id, proxy_config=proxy_config) as publisher:
             publish_result = await publisher.publish_item(
                 title=cleaned_title,
                 description=cleaned_description,

@@ -908,6 +908,73 @@ function renderStatusNoteBadge(statusNote, className) {
     `;
 }
 
+function getNoVncUrl() {
+    const hostname = window.location.hostname || 'localhost';
+    return `http://${hostname}:6080/vnc.html?autoconnect=1&resize=scale`;
+}
+
+function getManualInterventionAlert(statusNote, runtimeStatus) {
+    const noteText = String(statusNote || '').trim();
+    const tokenStatus = String(runtimeStatus?.token_refresh_status || '').trim();
+    const tokenError = String(runtimeStatus?.token_refresh_error_message || '').trim();
+    const combinedText = `${noteText} ${tokenStatus} ${tokenError}`;
+    const manualStatuses = new Set([
+        'account_risk_protected',
+        'manual_verification_required',
+        'verification_pending_manual',
+        'consecutive_failure_protected',
+        'captcha_max_retries_exceeded',
+        'password_login_backoff_wait',
+    ]);
+    const manualKeywords = ['滑块', '风控', '验证码', '验证', '账号存在风险', '拦截', '客户端登录'];
+    const needsIntervention = Boolean(noteText)
+        || manualStatuses.has(tokenStatus)
+        || manualKeywords.some(keyword => combinedText.includes(keyword));
+
+    if (!needsIntervention) {
+        return null;
+    }
+
+    let title = noteText || '检测到滑块/风控，需要人工处理';
+    if (!noteText && tokenStatus === 'password_login_backoff_wait') {
+        title = '登录恢复退避中，建议人工检查';
+    } else if (!noteText && tokenStatus === 'captcha_max_retries_exceeded') {
+        title = '滑块自动处理失败，需要人工接管';
+    }
+
+    const detail = tokenError || '请打开远程桌面检查浏览器页面，完成滑块、扫码、人脸或其他风控验证后再恢复账号。';
+
+    return {
+        title,
+        detail,
+        vncUrl: getNoVncUrl(),
+    };
+}
+
+function buildManualInterventionAlert(statusNote, runtimeStatus, options = {}) {
+    const alert = getManualInterventionAlert(statusNote, runtimeStatus);
+    if (!alert) {
+        return '';
+    }
+
+    const compactClass = options.compact ? ' is-compact' : '';
+    return `
+        <div class="manual-intervention-alert${compactClass}">
+            <div class="manual-intervention-alert-icon">
+                <i class="bi bi-exclamation-octagon-fill"></i>
+            </div>
+            <div class="manual-intervention-alert-copy">
+                <div class="manual-intervention-alert-title">${escapeHtml(alert.title)}</div>
+                <div class="manual-intervention-alert-detail">${escapeHtml(alert.detail)}</div>
+            </div>
+            <a class="manual-intervention-alert-action" href="${escapeHtml(alert.vncUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation();">
+                <i class="bi bi-display"></i>
+                打开远程桌面
+            </a>
+        </div>
+    `;
+}
+
 function renderDashboardAccountCard(account) {
     const isEnabled = account.enabled === undefined ? true : account.enabled;
     const keywordCount = account.keywordCount || 0;
@@ -958,6 +1025,7 @@ function renderDashboardAccountCard(account) {
         renderDashboardAccountMetric('定时擦亮', polishScheduleMetricText, polishScheduleTone)
     ].join('');
     const runtimeSnapshot = renderDashboardAccountRuntimeSnapshot(account.runtime_status);
+    const manualInterventionAlert = buildManualInterventionAlert(statusNoteText, account.runtime_status, { compact: true });
 
     const secondarySummary = [
         {
@@ -1012,6 +1080,7 @@ function renderDashboardAccountCard(account) {
                     ${renderStatusNoteBadge(statusNoteText, 'dashboard-account-status-note')}
                 </div>
             </div>
+            ${manualInterventionAlert}
             <div class="dashboard-account-main-metrics">${metrics}</div>
             ${runtimeSnapshot}
         </div>
@@ -3573,6 +3642,29 @@ function buildAboutReadinessValue(items) {
     `;
 }
 
+function buildAboutVncAccessPanel() {
+    const vncUrl = getNoVncUrl();
+
+    return `
+        <div class="account-diagnostics-vnc-panel">
+            <div class="account-diagnostics-vnc-copy">
+                <div class="account-diagnostics-vnc-title">
+                    <i class="bi bi-display"></i>
+                    <span>滑块/风控手动接管</span>
+                </div>
+                <div class="account-diagnostics-vnc-desc">
+                    检测到滑块或风控页面时，先确保账号开启“显示浏览器”，再通过网页远程桌面进入容器手动处理。
+                </div>
+                <div class="account-diagnostics-vnc-url">${escapeHtml(vncUrl)}</div>
+            </div>
+            <a class="account-diagnostics-vnc-button" href="${escapeHtml(vncUrl)}" target="_blank" rel="noopener">
+                <i class="bi bi-box-arrow-up-right"></i>
+                打开远程桌面
+            </a>
+        </div>
+    `;
+}
+
 function renderAboutAccountMeta(account) {
     const { accountMeta } = getAboutDiagnosticsElements();
     if (!accountMeta) return;
@@ -3709,6 +3801,7 @@ function renderAboutRuntimeStatus(runtimeStatus) {
         : readinessSignalItems.some(item => item.ready)
             ? 'warning'
             : 'danger';
+    const selectedAccount = aboutDiagnosticsAccounts.find(account => account.id === getAboutSelectedAccountId()) || null;
 
     statusContainer.innerHTML = `
         <div class="account-diagnostics-status-shell">
@@ -3716,6 +3809,8 @@ function renderAboutRuntimeStatus(runtimeStatus) {
                 <div class="account-diagnostics-status-note-title">${escapeHtml(overview.title)}</div>
                 <div class="account-diagnostics-status-note-text">${escapeHtml(overview.note)}</div>
             </div>
+            ${buildManualInterventionAlert(selectedAccount?.status_note || '', runtimeStatus)}
+            ${buildAboutVncAccessPanel()}
             <div class="account-diagnostics-status-body">
                 <div class="account-diagnostics-status-primary">
                     <div class="account-diagnostics-status-grid">

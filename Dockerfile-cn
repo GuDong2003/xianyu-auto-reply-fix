@@ -70,6 +70,8 @@ RUN apt-get update && \
         libxfixes3 \
         xdg-utils \
         chromium \
+        novnc \
+        websockify \
         # OpenCV运行时依赖
         libgl1 \
         libglib2.0-0 \
@@ -109,6 +111,7 @@ RUN echo "ulimit -c 0" >> /etc/profile
 
 # 暴露端口
 EXPOSE 8090
+EXPOSE 6080
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

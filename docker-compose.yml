@@ -22,6 +22,7 @@ services:
     ports:
       - "9000:8090"
       - "5900:5900"    # VNC 端口（可选，用于远程查看浏览器）
+      - "6080:6080"    # noVNC Web 端口（浏览器手动接管）
     volumes:
       # 数据持久化
       - ./data:/app/data:rw

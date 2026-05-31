@@ -8,6 +8,8 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import asyncio
+import json
+import re
 import os
 from loguru import logger
 
@@ -304,13 +306,18 @@ async def captcha_control_page_with_session(session_id: str):
     """返回带会话ID的滑块控制页面"""
     html_file = "captcha_control.html"
     
+    # Validate session_id to prevent XSS injection
+    if not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+    
     if os.path.exists(html_file):
         with open(html_file, 'r', encoding='utf-8') as f:
             html_content = f.read()
-            # 注入会话ID
+            # 注入会话ID (session_id is validated above, use json.dumps for safe JS string)
+            safe_session_id = json.dumps(session_id)
             html_content = html_content.replace(
                 '</body>',
-                f'<script>window.INITIAL_SESSION_ID = "{session_id}";</script></body>'
+                f'<script>window.INITIAL_SESSION_ID = {safe_session_id};</script></body>'
             )
             return HTMLResponse(content=html_content)
     else:

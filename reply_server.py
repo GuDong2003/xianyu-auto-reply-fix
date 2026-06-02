@@ -3247,6 +3247,9 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'cookie_refresh_enabled': None,
         'manual_refresh_active': False,
         'auth_recovery_owner': None,
+        'vnc_manual_action_available': False,
+        'manual_browser_session_status': None,
+        'manual_browser_reason': None,
     }
     if not cleaned_cid:
         return runtime_status
@@ -3442,6 +3445,37 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         message_stream_note_parts.append(sync_note)
     message_stream_note = ' · '.join(message_stream_note_parts)
 
+    manual_browser_status = None
+    manual_browser_reason = None
+    try:
+        for session in password_login_sessions.values():
+            if str(session.get('account_id') or '').strip() != cleaned_cid:
+                continue
+            if not session.get('show_browser'):
+                continue
+            session_status = str(session.get('status') or '').strip()
+            if session_status in {'success', 'failed', 'cancelled', 'error', 'not_found', 'forbidden'}:
+                continue
+            if session.get('completed_at'):
+                continue
+            manual_browser_status = session_status or 'processing'
+            manual_browser_reason = 'active_password_refresh' if session.get('refresh_mode') else 'active_password_login'
+            break
+    except Exception:
+        manual_browser_status = None
+        manual_browser_reason = None
+
+    vnc_relevant_token_statuses = {
+        'manual_refresh_active',
+        'manual_refresh_browser_stabilizing',
+        'verification_pending_manual',
+        'manual_verification_required',
+    }
+    vnc_manual_action_available = bool(
+        manual_browser_status
+        or token_refresh_status in vnc_relevant_token_statuses
+    )
+
     runtime_status.update({
         'instance_exists': True,
         'running': True,
@@ -3494,6 +3528,9 @@ def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
         'state_last_changed_at_display': _format_runtime_timestamp(last_state_changed_at),
         'cookie_refresh_enabled': getattr(live_instance, 'cookie_refresh_enabled', None),
         'manual_refresh_active': bool(XianyuLive.is_manual_refresh_active(cleaned_cid, allow_handoff_recovery=True)),
+        'vnc_manual_action_available': vnc_manual_action_available,
+        'manual_browser_session_status': manual_browser_status,
+        'manual_browser_reason': manual_browser_reason,
     })
     return runtime_status
 

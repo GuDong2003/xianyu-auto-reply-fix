@@ -913,11 +913,31 @@ function getNoVncUrl() {
     return `http://${hostname}:6080/vnc.html?autoconnect=1&resize=scale`;
 }
 
+function isVncManualActionAvailable(runtimeStatus) {
+    if (!runtimeStatus) {
+        return false;
+    }
+
+    if (runtimeStatus.vnc_manual_action_available === true) {
+        return true;
+    }
+
+    const tokenStatus = String(runtimeStatus.token_refresh_status || '').trim();
+    const vncRelevantStatuses = new Set([
+        'manual_refresh_active',
+        'manual_refresh_browser_stabilizing',
+        'verification_pending_manual',
+        'manual_verification_required',
+    ]);
+    return vncRelevantStatuses.has(tokenStatus);
+}
+
 function getManualInterventionAlert(statusNote, runtimeStatus) {
     const noteText = String(statusNote || '').trim();
     const tokenStatus = String(runtimeStatus?.token_refresh_status || '').trim();
     const tokenError = String(runtimeStatus?.token_refresh_error_message || '').trim();
     const combinedText = `${noteText} ${tokenStatus} ${tokenError}`;
+    const vncAvailable = isVncManualActionAvailable(runtimeStatus);
     const manualStatuses = new Set([
         'account_risk_protected',
         'manual_verification_required',
@@ -925,6 +945,8 @@ function getManualInterventionAlert(statusNote, runtimeStatus) {
         'consecutive_failure_protected',
         'captcha_max_retries_exceeded',
         'password_login_backoff_wait',
+        'token_refresh_failed',
+        'token_refresh_exception',
     ]);
     const manualKeywords = ['滑块', '风控', '验证码', '验证', '账号存在风险', '拦截', '客户端登录'];
     const needsIntervention = Boolean(noteText)
@@ -937,17 +959,25 @@ function getManualInterventionAlert(statusNote, runtimeStatus) {
 
     let title = noteText || '检测到滑块/风控，需要人工处理';
     if (!noteText && tokenStatus === 'password_login_backoff_wait') {
-        title = '登录恢复退避中，建议人工检查';
+        title = '登录恢复退避中，暂不可接管';
     } else if (!noteText && tokenStatus === 'captcha_max_retries_exceeded') {
-        title = '滑块自动处理失败，需要人工接管';
+        title = vncAvailable ? '滑块自动处理失败，需要人工接管' : '滑块自动处理失败，需重新发起恢复';
     }
 
-    const detail = tokenError || '请打开远程桌面检查浏览器页面，完成滑块、扫码、人脸或其他风控验证后再恢复账号。';
+    let detail = tokenError || '系统检测到认证链路异常。';
+    if (vncAvailable) {
+        detail = tokenError || '当前存在可接管的浏览器流程，请通过远程桌面完成滑块、扫码、人脸或其他风控验证。';
+    } else if (tokenStatus === 'password_login_backoff_wait') {
+        detail = tokenError || '当前只是失败退避等待，浏览器流程通常已结束。请重新发起“刷新 Cookie”并勾选“显示浏览器”，或等待退避结束。';
+    } else if (tokenStatus === 'captcha_max_retries_exceeded' || tokenStatus === 'token_refresh_failed' || tokenStatus === 'token_refresh_exception') {
+        detail = tokenError || '当前没有可接管的浏览器流程。请重新发起“刷新 Cookie”并勾选“显示浏览器”，让系统打开新的可接管页面。';
+    }
 
     return {
         title,
         detail,
         vncUrl: getNoVncUrl(),
+        vncAvailable,
     };
 }
 
@@ -967,10 +997,12 @@ function buildManualInterventionAlert(statusNote, runtimeStatus, options = {}) {
                 <div class="manual-intervention-alert-title">${escapeHtml(alert.title)}</div>
                 <div class="manual-intervention-alert-detail">${escapeHtml(alert.detail)}</div>
             </div>
-            <a class="manual-intervention-alert-action" href="${escapeHtml(alert.vncUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation();">
-                <i class="bi bi-display"></i>
-                打开远程桌面
-            </a>
+            ${alert.vncAvailable ? `
+                <a class="manual-intervention-alert-action" href="${escapeHtml(alert.vncUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation();">
+                    <i class="bi bi-display"></i>
+                    打开远程桌面
+                </a>
+            ` : ''}
         </div>
     `;
 }
@@ -3642,7 +3674,11 @@ function buildAboutReadinessValue(items) {
     `;
 }
 
-function buildAboutVncAccessPanel() {
+function buildAboutVncAccessPanel(runtimeStatus) {
+    if (!isVncManualActionAvailable(runtimeStatus)) {
+        return '';
+    }
+
     const vncUrl = getNoVncUrl();
 
     return `
@@ -3650,10 +3686,10 @@ function buildAboutVncAccessPanel() {
             <div class="account-diagnostics-vnc-copy">
                 <div class="account-diagnostics-vnc-title">
                     <i class="bi bi-display"></i>
-                    <span>滑块/风控手动接管</span>
+                    <span>当前可通过远程桌面接管</span>
                 </div>
                 <div class="account-diagnostics-vnc-desc">
-                    检测到滑块或风控页面时，先确保账号开启“显示浏览器”，再通过网页远程桌面进入容器手动处理。
+                    系统检测到正在运行的有头浏览器认证流程，此时在远程桌面中处理滑块/风控才会被后端继续检测并写回状态。
                 </div>
                 <div class="account-diagnostics-vnc-url">${escapeHtml(vncUrl)}</div>
             </div>
@@ -3810,7 +3846,7 @@ function renderAboutRuntimeStatus(runtimeStatus) {
                 <div class="account-diagnostics-status-note-text">${escapeHtml(overview.note)}</div>
             </div>
             ${buildManualInterventionAlert(selectedAccount?.status_note || '', runtimeStatus)}
-            ${buildAboutVncAccessPanel()}
+            ${buildAboutVncAccessPanel(runtimeStatus)}
             <div class="account-diagnostics-status-body">
                 <div class="account-diagnostics-status-primary">
                     <div class="account-diagnostics-status-grid">

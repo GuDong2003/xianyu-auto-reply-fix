@@ -6849,6 +6849,61 @@ class XianyuSliderStealth:
             "steps": learned_steps,
             "bounds": bounds,
         }
+
+    def _generate_upstream_three_phase_trajectory(self, distance: float):
+        """Generate the upstream-style no-overshoot three-phase trajectory."""
+        trajectory = []
+        total_steps = random.randint(5, 6)
+        total_duration = random.uniform(0.010, 0.020)
+        avg_delay = total_duration / total_steps
+
+        accel_steps = max(2, int(round(total_steps * (0.35 + random.uniform(-0.05, 0.05)))))
+        decel_steps = max(2, int(round(total_steps * (0.30 + random.uniform(-0.05, 0.05)))))
+        const_steps = max(2, total_steps - accel_steps - decel_steps)
+        total_steps = accel_steps + const_steps + decel_steps
+
+        accel_dist = distance * (0.30 + random.uniform(-0.05, 0.05))
+        const_dist = distance * (0.55 + random.uniform(-0.05, 0.05))
+        decel_dist = distance - accel_dist - const_dist
+
+        for i in range(1, accel_steps + 1):
+            t = i / accel_steps
+            trajectory.append((
+                accel_dist * (t * t),
+                random.uniform(-1.0, 1.0),
+                avg_delay * random.uniform(1.0, 1.3),
+            ))
+
+        for i in range(1, const_steps + 1):
+            t = i / const_steps
+            delay = avg_delay * random.uniform(0.85, 1.15)
+            if random.random() < 0.03:
+                delay *= random.uniform(1.1, 1.3)
+            trajectory.append((
+                accel_dist + const_dist * t,
+                random.uniform(-1.0, 1.0) * 0.6,
+                delay,
+            ))
+
+        decel_base_x = accel_dist + const_dist
+        for i in range(1, decel_steps + 1):
+            t = i / decel_steps
+            trajectory.append((
+                decel_base_x + decel_dist * (1 - (1 - t) ** 2),
+                random.uniform(-1.0, 1.0) * 0.4,
+                avg_delay * random.uniform(1.1, 1.5),
+            ))
+
+        if trajectory:
+            _, last_y, last_delay = trajectory[-1]
+            trajectory[-1] = (distance, last_y, last_delay)
+
+        logger.info(
+            f"【{self.pure_user_id}】🧍 原仓库风格三阶段轨迹: {total_steps}步 "
+            f"(加速{accel_steps}/匀速{const_steps}/减速{decel_steps})、"
+            f"总时长≈{total_duration * 1000:.0f}ms、距离{distance:.1f}px（无超调）"
+        )
+        return trajectory
     
     def generate_human_trajectory(self, distance: float, attempt: int = 1):
         """生成人类化滑动轨迹 - 只使用极速物理模型（带智能学习+失败后增加扰动）
@@ -7015,19 +7070,17 @@ class XianyuSliderStealth:
                 )
             else:
                 exploration_rate = ML_STRATEGY_CONFIG.get("exploration_rate", 0.35)
-                if failure_pressure and self._should_prefer_docker_conservative_profile(has_learning):
-                    conservative = ML_STRATEGY_CONFIG["strategies"]["conservative"]
-                    overshoot_ratio = random.uniform(*conservative["overshoot_ratio"])
-                    steps = random.randint(*conservative["steps"])
-                    base_delay = random.uniform(*conservative["base_delay"])
-                    acceleration_curve = random.uniform(*conservative["acceleration_curve"])
-                    y_jitter_max = random.uniform(*conservative["y_jitter_max"])
-                    selected_strategy = "conservative"
-                    profile_name = "failure_pressure_conservative"
+                if failure_pressure:
+                    overshoot_ratio = 1.0
+                    steps = random.randint(5, 6)
+                    base_delay = random.uniform(0.010, 0.020)
+                    acceleration_curve = 0.0
+                    y_jitter_max = 1.0
+                    selected_strategy = "upstream_three_phase"
+                    profile_name = "failure_pressure_upstream_three_phase"
                     logger.info(
-                        f"【{self.pure_user_id}】🧱 近期失败压力过高，改用保守非学习策略: "
-                        f"超调{(overshoot_ratio-1)*100:.1f}%, 步数{steps}, "
-                        f"延迟{base_delay*1000:.1f}ms, 曲线^{acceleration_curve:.2f}"
+                        f"【{self.pure_user_id}】🧱 近期失败压力过高，改用原仓库风格无超调三阶段策略: "
+                        f"步数{steps}, 延迟{base_delay*1000:.1f}ms"
                     )
                 elif self._should_force_docker_cold_start_conservative(attempt, has_learning):
                     conservative = ML_STRATEGY_CONFIG["strategies"]["conservative"]
@@ -7102,10 +7155,13 @@ class XianyuSliderStealth:
                                f"步数{steps}, 延迟{base_delay*1000:.1f}ms")
             
             # 生成轨迹（使用上面预生成的参数）
-            trajectory = self._generate_physics_trajectory_with_params(
-                distance, overshoot_ratio, steps, base_delay, 
-                acceleration_curve, y_jitter_max
-            )
+            if selected_strategy == "upstream_three_phase":
+                trajectory = self._generate_upstream_three_phase_trajectory(distance)
+            else:
+                trajectory = self._generate_physics_trajectory_with_params(
+                    distance, overshoot_ratio, steps, base_delay,
+                    acceleration_curve, y_jitter_max
+                )
             
             logger.debug(f"【{self.pure_user_id}】轨迹模式: 贝塞尔超调后回退，执行配置={selected_strategy}/{profile_name}")
             
@@ -7557,30 +7613,41 @@ class XianyuSliderStealth:
                 last_x, last_y = 0, 0
                 
                 # 执行拖动轨迹 - 直接移动到每个点
+                trajectory_profile = str(
+                    ((getattr(self, "current_trajectory_data", {}) or {}).get("random_params", {}) or {}).get("profile", "")
+                )
+                use_upstream_steps = trajectory_profile == "failure_pressure_upstream_three_phase"
                 for i, (x, y, delay) in enumerate(trajectory):
                     # 更新当前位置
                     current_x = start_x + x
                     current_y = start_y + y
                     
-                    # 🔧 关键改进：直接移动到目标点，不使用 steps 插值
-                    # 如果位移过大（>30px），分多次小步移动以更自然
-                    dx = x - last_x
-                    dy = y - last_y
-                    move_distance = math.sqrt(dx*dx + dy*dy)
-                    
-                    if move_distance > 30:
-                        # 大位移时，分成多个小步
-                        sub_steps = max(2, int(move_distance / 15))
-                        for j in range(sub_steps):
-                            progress = (j + 1) / sub_steps
-                            sub_x = start_x + last_x + dx * progress
-                            sub_y = start_y + last_y + dy * progress
-                            self.page.mouse.move(sub_x, sub_y)
-                            # 小步之间只有极短延迟
-                            time.sleep(random.uniform(0.001, 0.003))
+                    if use_upstream_steps:
+                        self.page.mouse.move(
+                            current_x,
+                            current_y,
+                            steps=random.randint(1, 3)
+                        )
                     else:
-                        # 小位移直接移动
-                        self.page.mouse.move(current_x, current_y)
+                        # 🔧 关键改进：直接移动到目标点，不使用 steps 插值
+                        # 如果位移过大（>30px），分多次小步移动以更自然
+                        dx = x - last_x
+                        dy = y - last_y
+                        move_distance = math.sqrt(dx*dx + dy*dy)
+
+                        if move_distance > 30:
+                            # 大位移时，分成多个小步
+                            sub_steps = max(2, int(move_distance / 15))
+                            for j in range(sub_steps):
+                                progress = (j + 1) / sub_steps
+                                sub_x = start_x + last_x + dx * progress
+                                sub_y = start_y + last_y + dy * progress
+                                self.page.mouse.move(sub_x, sub_y)
+                                # 小步之间只有极短延迟
+                                time.sleep(random.uniform(0.001, 0.003))
+                        else:
+                            # 小位移直接移动
+                            self.page.mouse.move(current_x, current_y)
                     
                     last_x, last_y = x, y
                     
@@ -7633,6 +7700,24 @@ class XianyuSliderStealth:
                 post_up_pause = random.uniform(0.02, 0.06)
                 slide_behavior['post_up_pause'] = post_up_pause
                 time.sleep(post_up_pause * _tempo(7))
+
+                try:
+                    slider_button.evaluate(
+                        """(slider, point) => {
+                            const event = new MouseEvent('click', {
+                                bubbles: true,
+                                cancelable: true,
+                                view: window,
+                                clientX: point.x,
+                                clientY: point.y,
+                                button: 0
+                            });
+                            slider.dispatchEvent(event);
+                        }""",
+                        {"x": current_x, "y": current_y},
+                    )
+                except Exception as e:
+                    logger.debug(f"【{self.pure_user_id}】释放后补发click事件失败（可忽略）: {e}")
 
                 # 等待服务端验证判定（关键：阿里滑块验证是异步的，需要给服务端足够时间返回结果）
                 if "server_judge_wait" in learned_behavior:

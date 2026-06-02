@@ -85,6 +85,7 @@ class OrderDetailFetcher:
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self._playwright = None  # Playwright driver实例，需保存以调用stop()回收进程
         self.headless = headless  # 保存headless设置
         self.cookie_id_for_log = cookie_id_for_log or "unknown"
         self._last_order_status_source = 'unknown'
@@ -123,7 +124,7 @@ class OrderDetailFetcher:
 
             logger.info(f"开始初始化浏览器，headless模式: {headless}")
 
-            playwright = await async_playwright().start()
+            self._playwright = await async_playwright().start()
 
             # 启动浏览器（Docker环境优化）
             browser_args = [
@@ -185,7 +186,7 @@ class OrderDetailFetcher:
                 ])
 
             logger.info(f"启动浏览器，参数: {browser_args}")
-            self.browser = await playwright.chromium.launch(
+            self.browser = await self._playwright.chromium.launch(
                 headless=headless,
                 args=browser_args
             )
@@ -2587,6 +2588,14 @@ class OrderDetailFetcher:
                     pass
                 self.browser = None
 
+            # 必须停止Playwright driver，否则底层server进程和chrome子进程会泄漏
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except:
+                    pass
+                self._playwright = None
+
             self._active_order_id = ''
 
         except Exception as e:
@@ -2603,6 +2612,10 @@ class OrderDetailFetcher:
                 await self.context.close()
             if self.browser:
                 await self.browser.close()
+            # 停止Playwright driver，回收底层server进程
+            if self._playwright:
+                await self._playwright.stop()
+                self._playwright = None
             self._active_order_id = ''
             logger.info("浏览器已关闭")
         except Exception as e:

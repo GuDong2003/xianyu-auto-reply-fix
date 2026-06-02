@@ -2593,6 +2593,73 @@ class XianyuSliderStealth:
 
         return history
 
+    def _has_recent_failure_pressure(self, reference_distance: Optional[float] = None,
+                                     window_seconds: int = 24 * 3600) -> bool:
+        """Return True when recent failed drags make learned replay risky."""
+        try:
+            if not os.path.exists(self.failure_history_file):
+                return False
+
+            with open(self.failure_history_file, 'r', encoding='utf-8') as f:
+                failures = json.load(f)
+            if not isinstance(failures, list):
+                return False
+
+            now = time.time()
+            current_scene = self._normalize_learning_scene()
+            recent_failures = []
+            for record in failures:
+                if not isinstance(record, dict):
+                    continue
+
+                ts = record.get("timestamp")
+                if isinstance(ts, (int, float)) and now - float(ts) > window_seconds:
+                    continue
+
+                record_scene = self._normalize_learning_scene(
+                    record.get("trigger_scene") or record.get("risk_trigger_scene")
+                )
+                if record_scene != "generic" and current_scene != "generic" and record_scene != current_scene:
+                    continue
+
+                distance_value = record.get("distance") or record.get("slide_distance")
+                if reference_distance is not None and isinstance(distance_value, (int, float)):
+                    if abs(float(distance_value) - float(reference_distance)) > 6.0:
+                        continue
+
+                feedback = record.get("verification_feedback") or {}
+                message = str(feedback.get("message") or feedback.get("dom_error_text") or "")
+                if feedback.get("status") == "failure" or "验证失败" in message or "点击框体重试" in message:
+                    recent_failures.append(record)
+
+            if len(recent_failures) < 6:
+                return False
+
+            success_history = self._load_success_history()
+            recent_success_count = 0
+            for record in success_history:
+                if not isinstance(record, dict) or not record.get("success"):
+                    continue
+                ts = record.get("timestamp")
+                if isinstance(ts, (int, float)) and now - float(ts) > window_seconds:
+                    continue
+                distance_value = record.get("distance")
+                if reference_distance is not None and isinstance(distance_value, (int, float)):
+                    if abs(float(distance_value) - float(reference_distance)) > 6.0:
+                        continue
+                recent_success_count += 1
+
+            pressure = len(recent_failures) >= max(6, recent_success_count * 3)
+            if pressure:
+                logger.warning(
+                    f"【{self.pure_user_id}】近期滑块失败压力过高: "
+                    f"失败{len(recent_failures)}次 / 成功{recent_success_count}次，临时禁用学习轨迹复用"
+                )
+            return pressure
+        except Exception as e:
+            logger.debug(f"【{self.pure_user_id}】统计近期滑块失败压力失败: {e}")
+            return False
+
     def _normalize_learning_scene(self, trigger_scene: Optional[str] = None) -> str:
         scene = str(trigger_scene or getattr(self, "risk_trigger_scene", None) or "").strip().lower()
         if scene in {"password_login", "manual_password_refresh"}:
@@ -6812,6 +6879,10 @@ class XianyuSliderStealth:
             force_explore_threshold = ML_STRATEGY_CONFIG.get("force_explore_after_failures", 2)
             slow_fallback_threshold = max(3, force_explore_threshold + 1)
             has_learning = optimized_params.get("learning_enabled") and optimized_params.get("history_count", 0) >= 3
+            failure_pressure = self._has_recent_failure_pressure(reference_distance=distance)
+            if failure_pressure:
+                has_learning = False
+                optimized_params = dict(self.trajectory_params)
             effective_ranges = self._get_effective_learning_ranges(optimized_params)
             bounds = effective_ranges["bounds"]
 
@@ -6944,7 +7015,21 @@ class XianyuSliderStealth:
                 )
             else:
                 exploration_rate = ML_STRATEGY_CONFIG.get("exploration_rate", 0.35)
-                if self._should_force_docker_cold_start_conservative(attempt, has_learning):
+                if failure_pressure and self._should_prefer_docker_conservative_profile(has_learning):
+                    conservative = ML_STRATEGY_CONFIG["strategies"]["conservative"]
+                    overshoot_ratio = random.uniform(*conservative["overshoot_ratio"])
+                    steps = random.randint(*conservative["steps"])
+                    base_delay = random.uniform(*conservative["base_delay"])
+                    acceleration_curve = random.uniform(*conservative["acceleration_curve"])
+                    y_jitter_max = random.uniform(*conservative["y_jitter_max"])
+                    selected_strategy = "conservative"
+                    profile_name = "failure_pressure_conservative"
+                    logger.info(
+                        f"【{self.pure_user_id}】🧱 近期失败压力过高，改用保守非学习策略: "
+                        f"超调{(overshoot_ratio-1)*100:.1f}%, 步数{steps}, "
+                        f"延迟{base_delay*1000:.1f}ms, 曲线^{acceleration_curve:.2f}"
+                    )
+                elif self._should_force_docker_cold_start_conservative(attempt, has_learning):
                     conservative = ML_STRATEGY_CONFIG["strategies"]["conservative"]
                     overshoot_ratio = random.uniform(*conservative["overshoot_ratio"])
                     steps = random.randint(*conservative["steps"])

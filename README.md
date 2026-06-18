@@ -105,6 +105,8 @@ AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配�
 | [配置说明](docs/configuration.md) | 环境变量、`global_config.yml`、AI 回复配置、运行期目录 |
 | [使用指南](docs/usage.md) | 用户注册、添加账号、自动回复、自动发货 |
 | [常见问题](docs/faq.md) | 端口、数据库、WebSocket、Playwright、Docker、Windows 问题 |
+| [项目路线图](docs/roadmap.md) | 维护方向、阶段目标、优先任务和验收标准 |
+| [更新日志](docs/changelog.md) | Xianyu Admin 维护版本的主要变化 |
 | [发版与热更新说明](docs/release.md) | 热更新清单、版本号、`release_precheck.py`、Release 流程 |
 | [安全政策](SECURITY.md) | 安全问题反馈和处理方式 |
 

@@ -301,6 +301,8 @@ build/
 !docs/usage.md
 !docs/faq.md
 !docs/release.md
+!docs/roadmap.md
+!docs/changelog.md
 
 # 临时配置文件
 *.local.yml

@@ -11,6 +11,7 @@
 - 增加首次部署安全基线说明，覆盖 `.env`、默认管理员密码、`JWT_SECRET_KEY`、AI API Key、Cookie、Token、数据库和日志文件。
 - 新增维护工作流文档，覆盖分支约定、上游同步、提交前检查、发布前检查和敏感信息检查。
 - FAQ 补充国内 Docker 构建常见失败场景。
+- 新增 `/version` 和 `/api/system/info` 公开系统信息接口，便于确认版本、运行模式、Python 环境、数据库版本和服务状态。
 
 ### Changed
 

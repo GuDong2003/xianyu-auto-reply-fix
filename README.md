@@ -170,6 +170,7 @@ AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配�
 - **日志文件**：`logs/` 目录下按日期分割。
 - **日志级别**：支持 DEBUG、INFO、WARNING、ERROR。
 - **健康检查**：访问 `/health` 检查服务状态。
+- **系统信息**：访问 `/version` 或 `/api/system/info` 查看版本、运行模式、Python 环境、数据库版本和服务摘要。
 
 ## 与上游同步
 

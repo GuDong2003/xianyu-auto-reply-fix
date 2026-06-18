@@ -63,12 +63,12 @@
 
 优先任务：
 
-- [ ] 检查 `.gitignore` 是否覆盖运行期目录和敏感文件
-- [ ] 整理 `.env.example`，区分示例值、必填项和生产建议
-- [ ] README 明确首次部署必须修改默认管理员密码
-- [ ] README 和配置文档说明 `JWT_SECRET_KEY`、AI API Key、Cookie 的保存方式
-- [ ] 检查 Docker Compose 中的默认密钥和默认账号提示
-- [ ] 增加生产部署安全提示
+- [x] 检查 `.gitignore` 是否覆盖运行期目录和敏感文件
+- [x] 整理 `.env.example`，区分示例值、必填项和生产建议
+- [x] README 明确首次部署必须修改默认管理员密码
+- [x] README 和配置文档说明 `JWT_SECRET_KEY`、AI API Key、Cookie 的保存方式
+- [x] 检查 Docker Compose 中的默认密钥和默认账号提示
+- [x] 增加生产部署安全提示
 
 需要重点忽略的内容：
 

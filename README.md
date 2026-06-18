@@ -36,6 +36,9 @@
 git clone https://github.com/qianmokano/Xianyu_admin.git
 cd Xianyu_admin
 
+cp .env.example .env
+# 编辑 .env，至少修改 ADMIN_PASSWORD 和 JWT_SECRET_KEY
+
 docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
 docker compose -f docker-compose-cn.yml up -d
 curl http://localhost:8000/health
@@ -46,7 +49,7 @@ curl http://localhost:8000/health
 - Web 管理界面：`http://localhost:8000`
 - API 文档：`http://localhost:8000/docs`
 - 健康检查：`http://localhost:8000/health`
-- 默认账号：`admin / admin123`
+- 默认账号：`admin / .env 中的 ADMIN_PASSWORD`。如果未创建 `.env`，首次初始化默认密码为 `admin123`
 
 如果基础镜像或 Playwright 下载源需要临时覆盖：
 
@@ -61,6 +64,8 @@ docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
 ```bash
 git clone https://github.com/qianmokano/Xianyu_admin.git
 cd Xianyu_admin
+cp .env.example .env
+# 编辑 .env，至少修改 ADMIN_PASSWORD 和 JWT_SECRET_KEY
 docker compose up -d
 ```
 
@@ -69,7 +74,9 @@ docker compose up -d
 - Web 管理界面：`http://localhost:9000`
 - API 文档：`http://localhost:9000/docs`
 - 健康检查：`http://localhost:9000/health`
-- 默认账号：`admin / admin123`
+- 默认账号：`admin / .env 中的 ADMIN_PASSWORD`。如果未创建 `.env`，首次初始化默认密码为 `admin123`
+
+> 安全提示：`ADMIN_PASSWORD` 只影响首次创建数据库时的默认管理员密码。已有数据库请登录 Web 管理界面修改密码。请不要提交 `.env`、Cookie、Token、API Key、数据库或日志文件。
 
 ### 本地运行
 
@@ -96,6 +103,13 @@ python Start.py
 AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配置模式，支持 OpenAI-compatible、OpenAI Responses、DashScope、Gemini、Anthropic、Azure OpenAI 等接口。
 
 第三方 OpenAI-compatible 服务可通过自定义 `base_url` 接入；详细配置和新增 Provider 说明见 [配置说明](docs/configuration.md)。
+
+## 安全基线
+
+- 首次 Docker 部署前建议复制 `.env.example` 为 `.env`，并修改 `ADMIN_PASSWORD` 和 `JWT_SECRET_KEY`。
+- `.env`、数据库、日志、浏览器状态、Cookie、Token、API Key 不应提交到版本库。
+- `data/`、`logs/`、`backups/` 等运行期目录已在 `.gitignore` 中忽略。
+- 对外暴露服务前，请确认默认管理员密码已修改，并按实际环境配置反向代理、访问控制和备份策略。
 
 ## 文档导航
 

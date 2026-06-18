@@ -22,6 +22,8 @@
 ```bash
 git clone https://github.com/qianmokano/Xianyu_admin.git
 cd Xianyu_admin
+cp .env.example .env
+# 编辑 .env，至少修改 ADMIN_PASSWORD 和 JWT_SECRET_KEY
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
@@ -53,6 +55,8 @@ XIAN_ADMIN_COMPOSE_FILE=docker-compose-cn.yml ./docker-deploy.sh health
 ```cmd
 git clone https://github.com/qianmokano/Xianyu_admin.git
 cd Xianyu_admin
+copy .env.example .env
+REM 编辑 .env，至少修改 ADMIN_PASSWORD 和 JWT_SECRET_KEY
 docker-deploy.bat
 ```
 
@@ -68,6 +72,8 @@ docker-deploy.bat
 ```bash
 git clone https://github.com/qianmokano/Xianyu_admin.git
 cd Xianyu_admin
+cp .env.example .env
+# 编辑 .env，至少修改 ADMIN_PASSWORD 和 JWT_SECRET_KEY
 docker compose up -d
 ```
 
@@ -78,6 +84,8 @@ docker compose up -d
 ```bash
 git clone https://github.com/qianmokano/Xianyu_admin.git
 cd Xianyu_admin
+cp .env.example .env
+# 编辑 .env，至少修改 ADMIN_PASSWORD 和 JWT_SECRET_KEY
 docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
 docker compose -f docker-compose-cn.yml up -d
 ```
@@ -152,4 +160,6 @@ python Start.py
 - 用户名：`admin`
 - 密码：`admin123`
 
-> ⚠️ 首次登录后请立即修改默认密码。
+如果部署前复制并修改了 `.env` 中的 `ADMIN_PASSWORD`，首次初始化会使用该密码。已有数据库不会被环境变量覆盖，请登录 Web 管理界面修改密码。
+
+> ⚠️ 对外暴露服务前，请修改默认密码和 `JWT_SECRET_KEY`，并不要提交 `.env`、数据库、日志、Cookie、Token 或 API Key。

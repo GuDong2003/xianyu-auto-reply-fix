@@ -6,9 +6,19 @@
 
 ## Unreleased
 
+### Added
+
+- 增加首次部署安全基线说明，覆盖 `.env`、默认管理员密码、`JWT_SECRET_KEY`、AI API Key、Cookie、Token、数据库和日志文件。
+
+### Changed
+
+- 默认管理员首次初始化支持通过 `ADMIN_PASSWORD` 环境变量覆盖。
+- Docker Compose 中 `JWT_SECRET_KEY` 的弱默认值改为显眼的 `change-me` 占位。
+- `.env.example` 明确为示例配置，并补充敏感字段加密说明。
+- `.gitignore` 增加本地敏感加密密钥文件忽略规则。
+
 ### Planned
 
-- 完善配置与安全基线，检查 `.gitignore`、`.env.example`、默认密码和默认密钥提示。
 - 继续优化国内 Docker 部署文档和失败排查说明。
 - 增加基础 smoke test 和发布前检查命令。
 - 逐步统一后台页面文案和版本标识。

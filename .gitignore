@@ -386,6 +386,8 @@ check_disk_usage.py
 .env.*
 !.env.example
 .env.docker
+.secret_encryption.key
+*.secret_encryption.key
 
 # === 滑块验证模块配置 ===
 # 允许跟踪源代码和二进制扩展模块

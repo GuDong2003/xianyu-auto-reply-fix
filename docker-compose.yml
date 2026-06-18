@@ -54,7 +54,7 @@ services:
       - SQL_LOG_LEVEL=${SQL_LOG_LEVEL:-INFO}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-default-secret-key}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-to-a-long-random-secret}
       - SESSION_TIMEOUT=${SESSION_TIMEOUT:-3600}
       # 多用户系统配置
       - MULTIUSER_ENABLED=${MULTIUSER_ENABLED:-true}

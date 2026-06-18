@@ -1,6 +1,6 @@
 # 部署与运行指南
 
-> 返回：[README](../README.md) ｜ 相关：[配置说明](configuration.md) ｜ [常见问题](faq.md)
+> 返回：[README](../README.md) ｜ 相关：[配置说明](configuration.md) ｜ [常见问题](faq.md) ｜ [维护工作流](maintenance.md)
 
 本页保存 README 中不适合展开的部署细节，README 只保留最短启动路径。
 

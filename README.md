@@ -121,6 +121,7 @@ AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配�
 | [常见问题](docs/faq.md) | 端口、数据库、WebSocket、Playwright、Docker、Windows 问题 |
 | [项目路线图](docs/roadmap.md) | 维护方向、阶段目标、优先任务和验收标准 |
 | [更新日志](docs/changelog.md) | Xianyu Admin 维护版本的主要变化 |
+| [维护工作流](docs/maintenance.md) | 分支约定、上游同步、检查命令和发布前流程 |
 | [发版与热更新说明](docs/release.md) | 热更新清单、版本号、`release_precheck.py`、Release 流程 |
 | [安全政策](SECURITY.md) | 安全问题反馈和处理方式 |
 
@@ -189,6 +190,8 @@ git merge upstream/main
 ```bash
 git remote set-url --push upstream DISABLED
 ```
+
+更多分支约定、同步检查清单和发布前命令见 [维护工作流](docs/maintenance.md)。
 
 ## 贡献指南
 

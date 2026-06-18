@@ -1,6 +1,6 @@
 # 配置说明
 
-> 返回：[README](../README.md) ｜ 相关：[部署与运行指南](deployment.md) ｜ [AI 回复配置](../README.md#-ai-回复配置) ｜ [常见问题](faq.md)
+> 返回：[README](../README.md) ｜ 相关：[部署与运行指南](deployment.md) ｜ [AI 回复配置](../README.md#-ai-回复配置) ｜ [常见问题](faq.md) ｜ [维护工作流](maintenance.md)
 
 本项目的配置分为环境变量、`global_config.yml` 和 Web 管理界面配置。敏感信息建议仅保存在 `.env`、Web 管理界面或运行期数据目录中，不要提交到版本库。
 

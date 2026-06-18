@@ -1264,6 +1264,88 @@ if not os.path.exists(uploads_dir):
     os.makedirs(uploads_dir, exist_ok=True)
     logger.info(f"创建图片上传目录: {uploads_dir}")
 
+
+def _read_app_version() -> str:
+    """读取维护版本号。"""
+    version_path = Path(static_dir) / "version.txt"
+    try:
+        if version_path.exists():
+            version = version_path.read_text(encoding="utf-8").strip()
+            return version or app.version
+    except Exception as exc:
+        logger.warning(f"读取版本文件失败: {exc}")
+    return app.version
+
+
+def _get_database_status() -> Dict[str, Any]:
+    """获取数据库连接和迁移版本状态。"""
+    try:
+        db_manager.get_all_cookies()
+        db_version = db_manager.get_system_setting("db_version") or "unknown"
+        return {
+            "status": "ok",
+            "version": db_version
+        }
+    except Exception as exc:
+        logger.warning(f"数据库状态检查失败: {exc}")
+        return {
+            "status": "error",
+            "version": "unknown",
+            "error": str(exc)
+        }
+
+
+def _build_system_info() -> Dict[str, Any]:
+    """构建公开的系统信息，不包含敏感配置值。"""
+    import platform
+    import sys
+
+    database = _get_database_status()
+    is_docker = bool(os.getenv("DOCKER_ENV")) or os.path.exists("/.dockerenv")
+
+    return {
+        "project": {
+            "name": "Xianyu Admin",
+            "version": _read_app_version(),
+            "api_title": app.title,
+            "api_version": app.version
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "implementation": platform.python_implementation(),
+            "mode": "docker" if is_docker else "local",
+            "executable": Path(sys.executable).name
+        },
+        "services": {
+            "cookie_manager": "ok" if cookie_manager.manager is not None else "error",
+            "database": database["status"]
+        },
+        "database": database,
+        "environment": {
+            "timezone": os.getenv("TZ", "unknown"),
+            "log_level": os.getenv("LOG_LEVEL", "INFO"),
+            "debug": os.getenv("DEBUG", "false").lower() == "true",
+            "reload": os.getenv("RELOAD", "false").lower() == "true",
+            "docker": is_docker,
+            "hostname": os.getenv("HOSTNAME", "")
+        },
+        "timestamp": time.time()
+    }
+
+
+@app.get('/version')
+async def version_info():
+    """返回维护版本和运行时摘要，便于部署后快速确认。"""
+    return _build_system_info()
+
+
+@app.get('/api/system/info')
+async def system_info():
+    """返回公开系统信息，便于 smoke test 和排障。"""
+    return _build_system_info()
+
+
 # 健康检查端点
 @app.get('/health')
 async def health_check():

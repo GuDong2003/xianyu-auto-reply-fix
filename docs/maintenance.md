@@ -54,6 +54,8 @@ python3 -m py_compile reply_server.py
 
 ```bash
 curl -sS http://localhost:8000/health
+curl -sS http://localhost:8000/version
+curl -sS http://localhost:8000/api/system/info
 curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8000/
 curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:8000/docs
 ```

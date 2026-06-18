@@ -6,6 +6,52 @@
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Usage](https://img.shields.io/badge/Usage-仅供学习-red.svg)](#️-版权声明与使用条款)
 
+---
+
+### Atlas Cloud（OpenAI 兼容推理平台）
+
+<p align="center">
+  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=xianyu-auto-reply-fix">
+    <img src="./assets/atlas-cloud-logo.png" alt="Atlas Cloud" width="200">
+  </a>
+</p>
+
+> 🎁 **[Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=xianyu-auto-reply-fix)** 为闲鱼智能客服的 AI 自动回复模块提供 OpenAI 兼容 API，支持通过单一 API 密钥接入 DeepSeek、Qwen、GLM、Kimi、MiniMax 等 59 个模型，无需单独申请各家 key，降低运营成本。
+>
+> 推理预算优化：[Coding Plan](https://www.atlascloud.ai/console/coding-plan)
+
+**接入配置示例（在 Web 管理界面「AI 回复」设置中填写）：**
+
+```env
+OPENAI_API_BASE=https://api.atlascloud.ai/v1
+OPENAI_API_KEY=<your-atlascloud-key>
+MODEL=deepseek-ai/deepseek-v4-pro
+```
+
+> `deepseek-ai/deepseek-v4-pro` 是推理模型，调用时需设置 `max_tokens ≥ 512`，否则返回为空。
+
+<details>
+<summary>📋 支持的 59 个推理模型（点击展开）</summary>
+
+| 厂商 | 模型 |
+|------|------|
+| DeepSeek | deepseek-ai/deepseek-v4-pro, deepseek-ai/deepseek-v3, deepseek-ai/deepseek-r1, deepseek-ai/deepseek-r1-0528 |
+| Qwen（通义） | qwen/qwen3-235b-a22b, qwen/qwen3-32b, qwen/qwen3-14b, qwen/qwen3-8b, qwen/qwen2.5-72b-instruct, qwen/qwen2.5-32b-instruct, qwen/qwen2.5-14b-instruct, qwen/qwen2.5-7b-instruct |
+| GLM（智谱） | zhipu/glm-4-plus, zhipu/glm-4-0520, zhipu/glm-4-air, zhipu/glm-4-flash, zhipu/glm-z1-air, zhipu/glm-z1-flash, zhipu/glm-z1-0414 |
+| Kimi（月之暗面） | moonshot/moonshot-v1-8k, moonshot/moonshot-v1-32k, moonshot/moonshot-v1-128k, moonshot/kimi-k2-5 |
+| MiniMax | minimax/minimax-m1, minimax/minimax-text-01 |
+| 百川 | baichuan/baichuan4, baichuan/baichuan4-air, baichuan/baichuan3-turbo, baichuan/baichuan3-turbo-128k |
+| 字节跳动 | bytedance/doubao-pro-32k, bytedance/doubao-pro-128k, bytedance/doubao-lite-32k, bytedance/doubao-1.5-pro-32k, bytedance/doubao-1.5-pro-256k |
+| 百度文心 | baidu/ernie-4.5-8k, baidu/ernie-4.0-8k, baidu/ernie-3.5-128k, baidu/ernie-lite-8k |
+| Anthropic Claude | anthropic/claude-3-7-sonnet, anthropic/claude-3-5-sonnet-20241022, anthropic/claude-3-5-haiku |
+| OpenAI | openai/gpt-4o, openai/gpt-4o-mini, openai/gpt-4-turbo, openai/o1-mini, openai/o1-preview |
+| Google Gemini | google/gemini-2.0-flash, google/gemini-1.5-pro, google/gemini-1.5-flash |
+| 其他 | yi/yi-lightning, yi/yi-large, 01ai/yi-34b-chat, lingyiwanwu/yi-vision-01 |
+
+</details>
+
+---
+
 ## 📋 项目概述
 
 一个基于 **FastAPI + SQLite + Playwright** 的闲鱼管理系统，支持多用户、多账号管理、关键词回复、AI 自动回复、自动发货、商品管理、日志监控和 Docker 一键部署。

@@ -28,6 +28,21 @@ chmod +x docker-deploy.sh
 
 脚本会自动检查依赖、创建目录、构建镜像并启动服务。
 
+常用管理命令：
+
+```bash
+./docker-deploy.sh status
+./docker-deploy.sh logs xianyu-admin-app
+./docker-deploy.sh health
+./docker-deploy.sh stop
+```
+
+如果需要在未启动容器时指定 Compose 文件，可使用：
+
+```bash
+XIAN_ADMIN_COMPOSE_FILE=docker-compose-cn.yml ./docker-deploy.sh health
+```
+
 默认访问地址：
 
 - `docker-compose.yml`：`http://localhost:9000`

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 闲鱼管理系统 Docker 部署脚本
+# Xianyu Admin Docker 部署脚本
 # 支持快速部署和管理
 
 set -e
@@ -13,9 +13,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 项目配置
-PROJECT_NAME="xianyu-auto-reply-fix"
-COMPOSE_FILE="docker-compose.yml"
-SELECTED_COMPOSE_FILE="$COMPOSE_FILE"
+PROJECT_NAME="xianyu-admin"
+APP_SERVICE="xianyu-admin-app"
+DEFAULT_COMPOSE_FILE="${XIAN_ADMIN_COMPOSE_FILE:-docker-compose.yml}"
+SELECTED_COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
 
 if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD="docker compose"
@@ -34,6 +35,21 @@ get_web_port() {
         echo "8000"
     else
         echo "9000"
+    fi
+}
+
+select_compose_file_for_existing_service() {
+    if [ -n "${XIAN_ADMIN_COMPOSE_FILE:-}" ]; then
+        SELECTED_COMPOSE_FILE="$XIAN_ADMIN_COMPOSE_FILE"
+        return
+    fi
+
+    local config_files
+    config_files=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.config_files" }}' "$APP_SERVICE" 2>/dev/null || true)
+    if echo "$config_files" | grep -q "docker-compose-cn.yml"; then
+        SELECTED_COMPOSE_FILE="docker-compose-cn.yml"
+    elif echo "$config_files" | grep -q "docker-compose.yml"; then
+        SELECTED_COMPOSE_FILE="docker-compose.yml"
     fi
 }
 
@@ -100,13 +116,14 @@ init_config() {
 # 构建镜像
 build_image() {
     print_info "构建 Docker 镜像..."
-    echo "是否需要使用国内镜像(y/n): " && read iscn
+    echo "是否需要使用国内镜像源？(y/n): " && read iscn
     if [[ $iscn == "y" ]]; then
         SELECTED_COMPOSE_FILE="docker-compose-cn.yml"
     else
-        SELECTED_COMPOSE_FILE="$COMPOSE_FILE"
-    fi  
-    compose build --no-cache
+        SELECTED_COMPOSE_FILE="$DEFAULT_COMPOSE_FILE"
+    fi
+    print_info "使用 Compose 文件: ${SELECTED_COMPOSE_FILE}"
+    compose build --no-cache "$APP_SERVICE"
     print_success "镜像构建完成"
 }
 
@@ -140,6 +157,7 @@ start_services() {
 
 # 停止服务
 stop_services() {
+    select_compose_file_for_existing_service
     print_info "停止服务..."
     compose down
     print_success "服务已停止"
@@ -147,6 +165,7 @@ stop_services() {
 
 # 重启服务
 restart_services() {
+    select_compose_file_for_existing_service
     print_info "重启服务..."
     compose restart
     print_success "服务已重启"
@@ -154,6 +173,7 @@ restart_services() {
 
 # 查看日志
 show_logs() {
+    select_compose_file_for_existing_service
     local service="$1"
     if [ -z "$service" ]; then
         compose logs -f
@@ -164,6 +184,7 @@ show_logs() {
 
 # 查看状态
 show_status() {
+    select_compose_file_for_existing_service
     print_info "服务状态:"
     compose ps
     
@@ -205,6 +226,7 @@ show_access_info() {
 
 # 健康检查
 health_check() {
+    select_compose_file_for_existing_service
     print_info "执行健康检查..."
     
     local web_port
@@ -277,6 +299,7 @@ update_deployment() {
 
 # 清理环境
 cleanup() {
+    select_compose_file_for_existing_service
     print_warning "这将删除所有容器、镜像和数据，确定要继续吗？(y/N)"
     read -r response
     
@@ -297,7 +320,7 @@ cleanup() {
 
 # 显示帮助信息
 show_help() {
-    echo "闲鱼管理系统 Docker 部署脚本"
+    echo "Xianyu Admin Docker 部署脚本"
     echo ""
     echo "用法: $0 [命令] [选项]"
     echo ""
@@ -319,7 +342,7 @@ show_help() {
     echo "  $0 init             # 初始化配置"
     echo "  $0 start            # 启动基础服务"
     echo "  $0 start with-nginx # 启动包含 Nginx 的服务"
-    echo "  $0 logs xianyu-app  # 查看应用日志"
+    echo "  $0 logs $APP_SERVICE  # 查看应用日志"
     echo ""
 }
 

@@ -1,9 +1,9 @@
 #!/bin/bash
-# 闲鱼自动回复系统停止脚本
+# 闲鱼运营管理系统（Xianyu Admin）停止脚本
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "正在停止闲鱼自动回复系统..."
+echo "正在停止闲鱼运营管理系统（Xianyu Admin）..."
 
 # 递归获取某个 PID 的所有子孙进程。
 get_descendants() {

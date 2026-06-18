@@ -2,13 +2,14 @@
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
-REM 闲鱼管理系统 Docker 部署脚本 (Windows版本)
+REM Xianyu Admin Docker 部署脚本 (Windows版本)
 REM 支持快速部署和管理
 
-title 闲鱼管理系统 Docker 部署
+title Xianyu Admin Docker 部署
 
 REM 项目配置
-set PROJECT_NAME=xianyu-auto-reply-fix
+set PROJECT_NAME=xianyu-admin
+set APP_SERVICE=xianyu-admin-app
 set COMPOSE_FILE=docker-compose.yml
 set "COMPOSE_CMD=docker-compose"
 
@@ -98,14 +99,15 @@ if /i "!use_cn!"=="y" (
 ) else (
     set "COMPOSE_FILE=docker-compose.yml"
 )
-%COMPOSE_CMD% -f %COMPOSE_FILE% build --no-cache
+echo %INFO_PREFIX% 使用 Compose 文件: %COMPOSE_FILE%
+%COMPOSE_CMD% -f %COMPOSE_FILE% build --no-cache %APP_SERVICE%
 if %errorlevel% neq 0 (
     echo %ERROR_PREFIX% 镜像构建失败
     pause
     exit /b 1
 )
 echo %SUCCESS_PREFIX% 镜像构建完成
-goto end
+exit /b 0
 
 :build_and_start
 call :build_image
@@ -205,7 +207,7 @@ echo.
 goto :eof
 
 :show_help
-echo 闲鱼管理系统 Docker 部署脚本 (Windows版本)
+echo Xianyu Admin Docker 部署脚本 (Windows版本)
 echo.
 echo 用法: %~nx0 [命令]
 echo.
@@ -222,7 +224,7 @@ echo.
 echo 示例:
 echo   %~nx0         # 快速部署
 echo   %~nx0 start   # 启动服务
-echo   %~nx0 logs    # 查看日志
+echo   %~nx0 logs %APP_SERVICE% # 查看应用日志
 echo.
 goto end
 

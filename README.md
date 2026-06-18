@@ -183,9 +183,9 @@ docker compose up -d
 ## Star History
 
 <a href="https://www.star-history.com/#GuDong2003/xianyu-auto-reply-fix&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date" />
- </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=GuDong2003/xianyu-auto-reply-fix&type=Date" />
+  </picture>
 </a>

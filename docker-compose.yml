@@ -1,18 +1,20 @@
+name: xianyu-admin
+
 services:
-  xianyu-app:
+  xianyu-admin-app:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BASE_IMAGE: python:3.11-slim-bookworm
-        HTTP_PROXY: ${HTTP_PROXY}
-        HTTPS_PROXY: ${HTTPS_PROXY}
-        NO_PROXY: ${NO_PROXY}
-        http_proxy: ${HTTP_PROXY}
-        https_proxy: ${HTTPS_PROXY}
-        no_proxy: ${NO_PROXY}
-    image: ghcr.io/gudong2003/xianyu-auto-reply-fix:latest
-    container_name: xianyu-auto-reply-fix
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        http_proxy: ${HTTP_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        no_proxy: ${NO_PROXY:-}
+    image: xianyu-admin:latest
+    container_name: xianyu-admin-app
     restart: unless-stopped
     # 使用root用户避免权限问题
     user: "0:0"
@@ -79,7 +81,7 @@ services:
       - MESSAGE_EXPIRE_TIME=${MESSAGE_EXPIRE_TIME:-300000}
 
     networks:
-      - xianyu-network
+      - xianyu-admin-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
       interval: 30s
@@ -99,7 +101,7 @@ services:
   # 可选：添加Nginx反向代理
   nginx:
     image: nginx:alpine
-    container_name: xianyu-nginx
+    container_name: xianyu-admin-nginx
     restart: unless-stopped
     ports:
       - "80:80"
@@ -108,18 +110,18 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
     depends_on:
-      - xianyu-app
+      - xianyu-admin-app
     networks:
-      - xianyu-network
+      - xianyu-admin-network
     profiles:
       - with-nginx
 
 networks:
-  xianyu-network:
+  xianyu-admin-network:
     driver: bridge
 
 volumes:
-  xianyu-data:
+  xianyu-admin-data:
     driver: local
-  xianyu-logs:
+  xianyu-admin-logs:
     driver: local

@@ -20,8 +20,8 @@
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
-cd xianyu-auto-reply-fix
+git clone https://github.com/qianmokano/Xianyu_admin.git
+cd Xianyu_admin
 chmod +x docker-deploy.sh
 ./docker-deploy.sh
 ```
@@ -36,8 +36,8 @@ chmod +x docker-deploy.sh
 ### Windows
 
 ```cmd
-git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
-cd xianyu-auto-reply-fix
+git clone https://github.com/qianmokano/Xianyu_admin.git
+cd Xianyu_admin
 docker-deploy.bat
 ```
 
@@ -51,8 +51,8 @@ docker-deploy.bat
 ### 默认配置
 
 ```bash
-git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
-cd xianyu-auto-reply-fix
+git clone https://github.com/qianmokano/Xianyu_admin.git
+cd Xianyu_admin
 docker compose up -d
 ```
 
@@ -61,18 +61,32 @@ docker compose up -d
 ### 国内构建配置
 
 ```bash
-git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
-cd xianyu-auto-reply-fix
-docker compose -f docker-compose-cn.yml up -d --build
+git clone https://github.com/qianmokano/Xianyu_admin.git
+cd Xianyu_admin
+docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
+docker compose -f docker-compose-cn.yml up -d
 ```
 
 访问：`http://localhost:8000`
 
+国内构建配置默认使用：
+
+- `BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim-bookworm`
+- `PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright`
+
+如果需要临时覆盖：
+
+```bash
+BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim-bookworm \
+PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright \
+docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
+```
+
 ## 方式三：本地运行
 
 ```bash
-git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
-cd xianyu-auto-reply-fix
+git clone https://github.com/qianmokano/Xianyu_admin.git
+cd Xianyu_admin
 
 python -m venv venv
 source venv/bin/activate  # Linux/macOS

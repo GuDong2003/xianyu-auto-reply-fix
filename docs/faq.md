@@ -1,6 +1,6 @@
 # 常见问题
 
-> 返回：[README](../README.md) ｜ 相关：[部署与运行指南](deployment.md) ｜ [配置说明](configuration.md) ｜ [使用指南](usage.md)
+> 返回：[README](../README.md) ｜ 相关：[部署与运行指南](deployment.md) ｜ [配置说明](configuration.md) ｜ [使用指南](usage.md) ｜ [维护工作流](maintenance.md)
 
 ## 端口被占用
 
@@ -36,6 +36,32 @@ playwright install chromium
 ```
 
 如网络较慢，可尝试配置可用的下载镜像后再安装。
+
+## 国内 Docker 构建卡在基础镜像或 Playwright 下载
+
+如果 Docker Hub 拉取失败，例如出现 `auth.docker.io/token`、`EOF`、`TLS handshake timeout`，优先使用国内 compose：
+
+```bash
+docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
+docker compose -f docker-compose-cn.yml up -d
+```
+
+国内 compose 默认使用：
+
+- `BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim-bookworm`
+- `PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright`
+
+如果下载源不可用，可以在 `.env` 中替换为当前可访问的镜像源后重新构建。
+
+## pip 或 apt 下载很慢
+
+国内 Dockerfile 已尽量使用国内镜像源。如果仍然很慢，先确认当前网络可以访问对应镜像站，再重新构建：
+
+```bash
+docker compose -f docker-compose-cn.yml build --no-cache xianyu-admin-app
+```
+
+如只改了代码，通常不需要 `--no-cache`，可以复用缓存提升速度。
 
 ## Shell 脚本执行错误（Linux/macOS）
 

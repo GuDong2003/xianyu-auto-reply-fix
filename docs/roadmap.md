@@ -1,6 +1,6 @@
 # 项目路线图
 
-> 返回：[README](../README.md) ｜ 相关：[更新日志](changelog.md) ｜ [部署与运行指南](deployment.md) ｜ [配置说明](configuration.md)
+> 返回：[README](../README.md) ｜ 相关：[更新日志](changelog.md) ｜ [维护工作流](maintenance.md) ｜ [部署与运行指南](deployment.md) ｜ [配置说明](configuration.md)
 
 本路线图用于记录 Xianyu Admin 作为二次维护版本的演进方向。目标不是一次性重写原项目，而是在保留上游能力的基础上，逐步改善部署体验、配置安全、运行稳定性、文档可维护性和后台使用体验。
 
@@ -94,10 +94,10 @@
 
 - [x] 新增项目路线图 `docs/roadmap.md`
 - [x] 新增更新日志 `docs/changelog.md`
-- [ ] 补充 FAQ 中的国内部署常见失败场景
-- [ ] 补充上游同步流程和冲突处理建议
-- [ ] 补充发布前检查命令清单
-- [ ] 统一 README、部署文档、配置文档之间的交叉链接
+- [x] 补充 FAQ 中的国内部署常见失败场景
+- [x] 补充上游同步流程和冲突处理建议
+- [x] 补充发布前检查命令清单
+- [x] 统一 README、部署文档、配置文档之间的交叉链接
 
 验收标准：
 
@@ -174,8 +174,8 @@
 
 优先任务：
 
-- [ ] 保持 `upstream` remote 指向原作者仓库
-- [ ] 记录上游同步步骤和冲突处理方式
+- [x] 保持 `upstream` remote 指向原作者仓库
+- [x] 记录上游同步步骤和冲突处理方式
 - [ ] 每次同步后检查 Dockerfile、compose、README、部署脚本和数据库迁移
 - [ ] 使用 `docs/changelog.md` 记录维护版本改动
 - [ ] 为稳定节点打 tag，例如 `v0.1.0-xianyu-admin`

@@ -1351,16 +1351,10 @@ async def system_info():
 async def health_check():
     """健康检查端点，用于Docker健康检查和负载均衡器"""
     try:
-        # 检查Cookie管理器状态
         manager_status = "ok" if cookie_manager.manager is not None else "error"
-
-        # 检查数据库连接
-        from db_manager import db_manager
-        try:
-            db_manager.get_all_cookies()
-            db_status = "ok"
-        except Exception:
-            db_status = "error"
+        database = _get_database_status()
+        db_status = database["status"]
+        is_docker = bool(os.getenv("DOCKER_ENV")) or os.path.exists("/.dockerenv")
 
         # 获取系统状态
         import psutil
@@ -1369,10 +1363,17 @@ async def health_check():
 
         status = {
             "status": "healthy" if manager_status == "ok" and db_status == "ok" else "unhealthy",
+            "version": _read_app_version(),
             "timestamp": time.time(),
             "services": {
                 "cookie_manager": manager_status,
                 "database": db_status
+            },
+            "database": {
+                "version": database["version"]
+            },
+            "runtime": {
+                "mode": "docker" if is_docker else "local"
             },
             "system": {
                 "cpu_percent": cpu_percent,
@@ -1380,6 +1381,9 @@ async def health_check():
                 "memory_available": memory_info.available
             }
         }
+
+        if db_status != "ok" and database.get("error"):
+            status["database"]["error"] = database["error"]
 
         if status["status"] == "unhealthy":
             raise HTTPException(status_code=503, detail=status)

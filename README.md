@@ -169,8 +169,8 @@ AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配�
 - **实时日志**：Web 界面查看实时系统日志。
 - **日志文件**：`logs/` 目录下按日期分割。
 - **日志级别**：支持 DEBUG、INFO、WARNING、ERROR。
-- **健康检查**：访问 `/health` 检查服务状态。
-- **系统信息**：访问 `/version` 或 `/api/system/info` 查看版本、运行模式、Python 环境、数据库版本和服务摘要。
+- **健康检查**：访问 `/health` 检查服务状态、维护版本、运行模式和数据库迁移版本。
+- **系统信息**：访问 `/version` 或 `/api/system/info` 查看 Python 环境、数据库版本和服务摘要等排障详情。
 
 ## 与上游同步
 

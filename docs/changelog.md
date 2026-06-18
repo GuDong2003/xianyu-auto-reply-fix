@@ -15,6 +15,7 @@
 
 ### Changed
 
+- `/health` 增加维护版本、运行模式、数据库迁移版本和数据库错误摘要，便于快速排障。
 - 默认管理员首次初始化支持通过 `ADMIN_PASSWORD` 环境变量覆盖。
 - Docker Compose 中 `JWT_SECRET_KEY` 的弱默认值改为显眼的 `change-me` 占位。
 - `.env.example` 明确为示例配置，并补充敏感字段加密说明。

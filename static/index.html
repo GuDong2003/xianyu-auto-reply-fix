@@ -1302,6 +1302,9 @@
               <button class="btn btn-primary" onclick="openOrderHistorySyncModal()">
                 <i class="bi bi-clock-history"></i> 历史同步
               </button>
+              <button class="btn btn-outline-warning" onclick="openOrderRecoverModal()">
+                <i class="bi bi-search"></i> 按订单ID补抓
+              </button>
               <button class="btn btn-outline-primary" onclick="refreshOrders()">
                 <i class="bi bi-arrow-clockwise"></i> 刷新
               </button>
@@ -1403,6 +1406,55 @@
                 </select>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="orderRecoverModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <div>
+              <h5 class="modal-title mb-1">
+                <i class="bi bi-search me-2"></i>按订单ID补抓
+              </h5>
+              <div class="text-muted small">当闲鱼能看到订单但系统未入库时，输入订单号强制拉取详情；确认待发货后可自动发货。</div>
+            </div>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label class="form-label">账号</label>
+              <select class="form-select" id="orderRecoverCookieId"></select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">订单ID</label>
+              <input type="text" class="form-control" id="orderRecoverOrderId" placeholder="请输入闲鱼订单号">
+            </div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">商品ID（可选）</label>
+                <input type="text" class="form-control" id="orderRecoverItemId" placeholder="缺失时可留空">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">买家ID（可选）</label>
+                <input type="text" class="form-control" id="orderRecoverBuyerId" placeholder="缺失时可留空">
+              </div>
+            </div>
+            <div class="form-check form-switch mt-3">
+              <input class="form-check-input" type="checkbox" id="orderRecoverAutoDeliver" checked>
+              <label class="form-check-label" for="orderRecoverAutoDeliver">如果详情确认待发货，立即尝试自动发货</label>
+            </div>
+            <div class="alert alert-warning small mt-3 mb-0">
+              历史同步接口无权限时，可用这个入口按已知订单号补救；订单号必须属于所选账号。
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">关闭</button>
+            <button type="button" class="btn btn-warning" id="orderRecoverSubmitBtn" onclick="recoverOrderById()">
+              <i class="bi bi-search"></i> 开始补抓
+            </button>
           </div>
         </div>
       </div>

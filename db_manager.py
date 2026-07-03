@@ -242,7 +242,7 @@ class DBManager:
             return normalized_incoming
 
         blocked_incoming_map = {
-            'pending_payment': {'processing'},
+            'pending_payment': set(),
             'pending_ship': {'processing', 'pending_payment'},
             'partial_success': {'processing', 'pending_payment', 'pending_ship', 'shipped'},
             'partial_pending_finalize': {'processing', 'pending_payment', 'pending_ship', 'shipped'},

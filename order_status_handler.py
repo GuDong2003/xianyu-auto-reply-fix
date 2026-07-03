@@ -36,7 +36,8 @@ class OrderStatusHandler:
     # 4. 退款中的订单可以设置为已完成（因为买家可能取消退款）
     # 5. 只有退款完成才设置为已关闭
     VALID_TRANSITIONS = {
-        'processing': ['pending_ship', 'partial_success', 'partial_pending_finalize', 'shipped', 'completed', 'cancelled'],
+        'processing': ['pending_payment', 'pending_ship', 'partial_success', 'partial_pending_finalize', 'shipped', 'completed', 'cancelled'],
+        'pending_payment': ['pending_ship', 'cancelled'],
         'pending_ship': ['partial_success', 'partial_pending_finalize', 'shipped', 'completed', 'cancelled', 'refunding'],  # 已付款，可以退款
         'partial_success': ['partial_pending_finalize', 'shipped', 'completed', 'cancelled', 'refunding'],  # 部分已完成，可继续推进或退款
         'partial_pending_finalize': ['partial_success', 'shipped', 'completed', 'cancelled', 'refunding'],  # 部分待收尾，可继续收尾后进入下一状态
@@ -54,6 +55,7 @@ class OrderStatusHandler:
         
         self.status_mapping = {
             'processing': '处理中',     # 初始状态/基本信息阶段
+            'pending_payment': '待付款',
             'pending_ship': '待发货',   # 已付款，等待发货
             'partial_success': '部分发货',  # 多数量发货部分完成
             'partial_pending_finalize': '部分待收尾',  # 多数量发货部分消息已发，待补收尾
@@ -128,6 +130,12 @@ class OrderStatusHandler:
         normalized_text = str(raw_text or '').strip()
         if not normalized_text:
             return None
+
+        source_key = str(source or '').rsplit('.', 1)[-1].lower()
+        if source_key in {'orderid', 'bizorderid', 'order_id', 'tradeid', 'trade_id'}:
+            direct_numeric = re.fullmatch(r'\d{10,}', normalized_text)
+            if direct_numeric:
+                return direct_numeric.group(0)
 
         patterns = [
             r'orderId(?:=|:|%3[Dd]|\\u003[dD])\s*"?(\d{10,})',
@@ -295,9 +303,9 @@ class OrderStatusHandler:
             '等待你发货': 'pending_ship',
             '等待卖家发货': 'pending_ship',
             '去发货': 'pending_ship',
-            '[我已拍下，待付款]': 'processing',
-            '买家已拍下，待付款': 'processing',
-            '等待买家付款': 'processing',
+            '[我已拍下，待付款]': 'pending_payment',
+            '买家已拍下，待付款': 'pending_payment',
+            '等待买家付款': 'pending_payment',
             '[退款成功，钱款已原路退返]': 'cancelled',
             '[你关闭了订单，钱款已原路退返]': 'cancelled',
             '交易关闭': 'cancelled',
@@ -325,7 +333,7 @@ class OrderStatusHandler:
         if '付款完成待发货' in normalized or 'trade_paid_done_seller' in lowered:
             return 'pending_ship'
         if '已拍下_未付款' in normalized or '1_not_pay_seller' in lowered:
-            return 'processing'
+            return 'pending_payment'
         return None
 
     def _resolve_system_message_status(self, message: dict, send_message: str):

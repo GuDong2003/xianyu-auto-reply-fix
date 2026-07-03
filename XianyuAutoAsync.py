@@ -822,7 +822,7 @@ class XianyuLive:
             return False
 
         backoff_reason = failure_backoff.get('reason', 'unknown')
-        if backoff_reason not in {'slider_failed', 'verification_required', 'credentials', 'risk_control'}:
+        if backoff_reason not in {'slider_failed', 'verification_required', 'credentials', 'risk_control', 'browser_crash'}:
             return False
 
         remaining_time = failure_backoff.get('remaining_time', 0.0)
@@ -873,6 +873,15 @@ class XianyuLive:
             ]
         ):
             return "login_form_missing", 90
+        if any(keyword in message for keyword in [
+            "页面会话已失效",
+            "target page, context or browser has been closed",
+            "page crashed",
+            "target crashed",
+            "browser has been closed",
+            "browser context has been closed",
+        ]):
+            return "browser_crash", 180
         if any(keyword in message for keyword in ["页面会话已失效", "target page, context or browser has been closed"]):
             return "unknown", 180
         if any(keyword in message for keyword in ["网络", "timeout", "cannot connect", "连接", "dns", "ssl"]):
@@ -4068,6 +4077,480 @@ class XianyuLive:
             )
             return False
 
+    def _get_stale_unsettled_orders(self, older_than_minutes: int = 10, limit: int = 5) -> list:
+        from db_manager import db_manager
+
+        safe_minutes = max(5, int(older_than_minutes or 10))
+        safe_limit = max(1, min(int(limit or 5), 20))
+        with db_manager.lock:
+            cursor = db_manager.conn.cursor()
+            cursor.execute(
+                '''
+                SELECT order_id, item_id, buyer_id, buyer_nick, sid, order_status, updated_at
+                FROM orders
+                WHERE cookie_id = ?
+                  AND order_status IN ('processing', 'pending_payment')
+                  AND datetime(updated_at) <= datetime('now', ?)
+                ORDER BY datetime(updated_at) ASC
+                LIMIT ?
+                ''',
+                (self.cookie_id, f'-{safe_minutes} minutes', safe_limit)
+            )
+            return [
+                {
+                    'order_id': row[0],
+                    'item_id': row[1],
+                    'buyer_id': row[2],
+                    'buyer_nick': row[3],
+                    'sid': row[4],
+                    'order_status': row[5],
+                    'updated_at': row[6],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    async def _recover_stale_unsettled_orders(self, older_than_minutes: int = 10, limit: int = 5) -> int:
+        from db_manager import db_manager
+
+        stale_orders = self._get_stale_unsettled_orders(older_than_minutes=older_than_minutes, limit=limit)
+        if not stale_orders:
+            return 0
+
+        recovered_count = 0
+        logger.warning(
+            f"【{self.cookie_id}】检测到 {len(stale_orders)} 个超时未结算订单，开始补偿刷新详情"
+        )
+        for order in stale_orders:
+            order_id = order.get('order_id')
+            old_status = order.get('order_status')
+            try:
+                logger.info(
+                    f"【{self.cookie_id}】补偿刷新订单详情: order_id={order_id}, "
+                    f"status={old_status}, updated_at={order.get('updated_at')}"
+                )
+                await self.fetch_order_detail_info(
+                    order_id=order_id,
+                    item_id=order.get('item_id'),
+                    buyer_id=order.get('buyer_id'),
+                    sid=order.get('sid'),
+                    buyer_nick=order.get('buyer_nick'),
+                    force_refresh=True,
+                )
+
+                latest_order = db_manager.get_order_by_id(order_id) or {}
+                latest_status = db_manager._normalize_order_status(latest_order.get('order_status'))
+                if latest_status == 'pending_ship':
+                    if await self._auto_deliver_recovered_pending_order(
+                        latest_order,
+                        fallback_order=order,
+                        source='stale_unsettled_recovery',
+                    ):
+                        recovered_count += 1
+                elif latest_status != old_status:
+                    logger.info(
+                        f"【{self.cookie_id}】补偿刷新已纠正订单状态: "
+                        f"order_id={order_id}, {old_status} -> {latest_status}"
+                    )
+                    recovered_count += 1
+                else:
+                    logger.info(
+                        f"【{self.cookie_id}】补偿刷新后订单状态未变化: "
+                        f"order_id={order_id}, status={latest_status}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as recover_e:
+                logger.error(f"【{self.cookie_id}】补偿刷新订单失败: order_id={order_id}, error={self._safe_str(recover_e)}")
+
+            await asyncio.sleep(0)
+
+        return recovered_count
+
+    def _save_recent_order_candidate(self, candidate: Dict[str, Any]) -> bool:
+        from db_manager import db_manager
+        from utils.order_history_sync import normalize_order_history_status
+
+        order_id = str(candidate.get('order_id') or '').strip()
+        if not order_id:
+            return False
+
+        existing_order = db_manager.get_order_by_id(order_id) or {}
+        incoming_status = normalize_order_history_status(candidate.get('order_status'))
+        order_status = self._resolve_external_order_status(
+            existing_order.get('order_status'),
+            incoming_status,
+            source='recent_order_watchdog',
+        )
+
+        return db_manager.insert_or_update_order(
+            order_id=order_id,
+            item_id=str(candidate.get('item_id') or '').strip() or None,
+            buyer_id=str(candidate.get('buyer_id') or '').strip() or None,
+            buyer_nick=str(candidate.get('buyer_nick') or '').strip() or None,
+            sid=str(candidate.get('sid') or '').strip() or None,
+            amount=str(candidate.get('amount') or '').strip() or None,
+            order_status=order_status,
+            cookie_id=self.cookie_id,
+            platform_created_at=str(candidate.get('platform_created_at') or '').strip() or None,
+            platform_paid_at=str(candidate.get('platform_paid_at') or '').strip() or None,
+            platform_completed_at=str(candidate.get('platform_completed_at') or '').strip() or None,
+        )
+
+    async def _send_recovered_delivery_without_sid(
+        self,
+        order: Dict[str, Any],
+        *,
+        order_id: str,
+        item_id: str,
+        buyer_id: str,
+        source: str,
+    ) -> bool:
+        from db_manager import db_manager
+
+        lock_key = order_id
+        if not self.can_auto_delivery(order_id):
+            logger.info(f"【{self.cookie_id}】{source} 订单已处理或处于冷却期，跳过补偿发货: {order_id}")
+            return False
+        if self.is_lock_held(lock_key):
+            logger.info(f"【{self.cookie_id}】{source} 订单延迟锁持有中，跳过补偿发货: {order_id}")
+            return False
+
+        order_lock = self._order_locks[lock_key]
+        self._lock_usage_times[lock_key] = time.time()
+
+        async with order_lock:
+            if self.is_lock_held(lock_key) or not self.can_auto_delivery(order_id):
+                logger.info(f"【{self.cookie_id}】{source} 获取锁后发现订单已处理，跳过补偿发货: {order_id}")
+                return False
+
+            pending_finalize_meta = self._get_pending_delivery_finalization_meta(order_id, 1)
+            if pending_finalize_meta:
+                finalize_result = await self._finalize_delivery_after_send(
+                    delivery_meta=pending_finalize_meta,
+                    order_id=order_id,
+                    item_id=item_id,
+                )
+                if not finalize_result.get('success'):
+                    self._persist_delivery_finalization_state(
+                        order_id=order_id,
+                        item_id=item_id,
+                        buyer_id=buyer_id,
+                        delivery_meta=pending_finalize_meta,
+                        channel='auto',
+                        status='sent',
+                        last_error=finalize_result.get('error') or '补偿发货补完成 finalize 失败',
+                    )
+                    self._record_delivery_log(
+                        order_id=order_id,
+                        item_id=item_id,
+                        buyer_id=buyer_id,
+                        status='failed',
+                        reason=finalize_result.get('error') or '补偿发货检测到已发送记录，但补完成发货收尾失败',
+                        channel='auto',
+                        rule_meta=pending_finalize_meta,
+                    )
+                    return False
+
+                self._persist_delivery_finalization_state(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    delivery_meta=pending_finalize_meta,
+                    channel='auto',
+                    status='finalized',
+                )
+                self._sync_order_delivery_progress(
+                    order_id=order_id,
+                    cookie_id=self.cookie_id,
+                    expected_quantity=1,
+                    context=f"{source} 补完成收尾成功",
+                )
+                self._activate_delivery_lock(lock_key, delay_minutes=10)
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    status='success',
+                    reason=f'{source} 检测到发货消息已发送，本次补完成收尾成功',
+                    channel='auto',
+                    rule_meta=pending_finalize_meta,
+                )
+                return True
+
+            delivery_result = await self._auto_delivery(
+                item_id,
+                "待获取商品信息",
+                order_id,
+                buyer_id,
+                '',
+                include_meta=True,
+            )
+            if isinstance(delivery_result, dict):
+                delivery_content = delivery_result.get('content')
+                delivery_steps = delivery_result.get('delivery_steps') or []
+                delivery_error = delivery_result.get('error')
+                delivery_meta = delivery_result
+            else:
+                delivery_content = delivery_result
+                delivery_steps = []
+                delivery_error = None
+                delivery_meta = {}
+
+            if not delivery_content:
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    status='failed',
+                    reason=delivery_error or f'{source} 未匹配到发货内容',
+                    channel='auto',
+                    rule_meta=delivery_meta,
+                )
+                return False
+
+            if not delivery_steps:
+                delivery_steps = self._build_delivery_steps(
+                    delivery_content,
+                    delivery_meta.get('card_description', '') if isinstance(delivery_meta, dict) else '',
+                )
+
+            try:
+                await self.send_delivery_steps_once(buyer_id, item_id, delivery_steps)
+
+                if not self._mark_data_reservation_sent_if_needed(delivery_meta):
+                    self._release_data_reservation_if_needed(delivery_meta, error='补偿发货发送成功后标记预占已发送失败')
+                    raise Exception('批量数据预占标记已发送失败')
+
+                self._persist_delivery_finalization_state(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    delivery_meta=delivery_meta,
+                    channel='auto',
+                    status='sent',
+                )
+
+                finalize_result = await self._finalize_delivery_after_send(
+                    delivery_meta=delivery_meta,
+                    order_id=order_id,
+                    item_id=item_id,
+                )
+                if not finalize_result.get('success'):
+                    self._persist_delivery_finalization_state(
+                        order_id=order_id,
+                        item_id=item_id,
+                        buyer_id=buyer_id,
+                        delivery_meta=delivery_meta,
+                        channel='auto',
+                        status='sent',
+                        last_error=finalize_result.get('error') or '补偿发货发送成功但提交发货副作用失败',
+                    )
+                    self._record_delivery_log(
+                        order_id=order_id,
+                        item_id=item_id,
+                        buyer_id=buyer_id,
+                        status='failed',
+                        reason=finalize_result.get('error') or '补偿发货发送成功但提交发货副作用失败',
+                        channel='auto',
+                        rule_meta=delivery_meta,
+                    )
+                    return False
+
+                self._persist_delivery_finalization_state(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    delivery_meta=delivery_meta,
+                    channel='auto',
+                    status='finalized',
+                )
+                self._sync_order_delivery_progress(
+                    order_id=order_id,
+                    cookie_id=self.cookie_id,
+                    expected_quantity=int(order.get('quantity') or 1),
+                    context=f"{source} 自动发货成功",
+                )
+                self._activate_delivery_lock(lock_key, delay_minutes=10)
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    status='success',
+                    reason=f'{source} 自动发货步骤发送成功',
+                    channel='auto',
+                    rule_meta=delivery_meta,
+                )
+                logger.warning(f"【{self.cookie_id}】{source} 已完成补偿自动发货: order_id={order_id}")
+                return True
+            except Exception as send_error:
+                self._release_data_reservation_if_needed(delivery_meta, error=self._safe_str(send_error))
+                self._persist_delivery_finalization_state(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    delivery_meta=delivery_meta,
+                    channel='auto',
+                    status='failed',
+                    last_error=self._safe_str(send_error),
+                )
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    status='failed',
+                    reason=f'{source} 自动发货消息发送失败: {self._safe_str(send_error)}',
+                    channel='auto',
+                    rule_meta=delivery_meta,
+                )
+                return False
+
+    async def _auto_deliver_recovered_pending_order(
+        self,
+        order: Dict[str, Any],
+        *,
+        fallback_order: Optional[Dict[str, Any]] = None,
+        source: str = 'order_recovery',
+    ) -> bool:
+        from db_manager import db_manager
+
+        fallback_order = fallback_order or {}
+        order_id = str(order.get('order_id') or fallback_order.get('order_id') or '').strip()
+        item_id = str(order.get('item_id') or fallback_order.get('item_id') or '').strip()
+        buyer_id = str(order.get('buyer_id') or fallback_order.get('buyer_id') or '').strip()
+        sid = str(order.get('sid') or fallback_order.get('sid') or '').strip()
+
+        if not order_id:
+            return False
+        if db_manager._normalize_order_status(order.get('order_status')) != 'pending_ship':
+            logger.info(f"【{self.cookie_id}】{source} 订单不是待发货，跳过自动发货: order_id={order_id}, status={order.get('order_status')}")
+            return False
+        if not self.is_auto_confirm_enabled():
+            logger.info(f"【{self.cookie_id}】{source} 发现订单待发货，但自动发货未启用: {order_id}")
+            return False
+        if not item_id or not buyer_id:
+            logger.warning(
+                f"【{self.cookie_id}】{source} 发现订单待发货，但缺少商品或买家信息，无法补偿发货: "
+                f"order_id={order_id}, item_id={item_id or '-'}, buyer_id={buyer_id or '-'}"
+            )
+            return False
+
+        websocket = getattr(self, 'ws', None)
+        chat_id = sid.replace('@goofish', '')
+        if websocket and chat_id:
+            await self._handle_simple_message_auto_delivery(
+                websocket,
+                order_id,
+                item_id,
+                buyer_id,
+                chat_id,
+                time.strftime('%Y-%m-%d %H:%M:%S'),
+                source,
+            )
+            return True
+
+        logger.warning(
+            f"【{self.cookie_id}】{source} 待发货订单缺少可用会话ID，尝试通过买家和商品建立会话补偿发货: "
+            f"order_id={order_id}, buyer_id={buyer_id}, item_id={item_id}"
+        )
+        return await self._send_recovered_delivery_without_sid(
+            order,
+            order_id=order_id,
+            item_id=item_id,
+            buyer_id=buyer_id,
+            source=source,
+        )
+
+    async def _recover_recent_missing_orders(self, max_orders: int = 10) -> int:
+        from db_manager import db_manager
+        from utils.order_history_sync import OrderHistoryPageFetcher, OrderHistorySyncError, normalize_order_history_status
+
+        safe_limit = max(1, min(int(max_orders or 10), 30))
+        disabled_until = getattr(self, '_recent_order_watchdog_disabled_until', 0)
+        if disabled_until and time.time() < disabled_until:
+            remaining_minutes = int((disabled_until - time.time()) / 60)
+            logger.info(f"【{self.cookie_id}】近期订单巡检处于退避中，剩余约 {remaining_minutes} 分钟")
+            return 0
+
+        history_fetcher = OrderHistoryPageFetcher(self.cookies_str, cookie_id_for_log=self.cookie_id, headless=True)
+        recovered_count = 0
+        try:
+            fetch_result = await history_fetcher.fetch_recent_orders(max_orders=safe_limit)
+            candidates = list(fetch_result.get('orders') or [])
+            if not candidates:
+                logger.info(f"【{self.cookie_id}】近期订单巡检未发现订单候选")
+                return 0
+
+            logger.info(
+                f"【{self.cookie_id}】近期订单巡检完成: scanned={fetch_result.get('scanned_count')}, "
+                f"candidates={len(candidates)}"
+            )
+            for candidate in candidates:
+                order_id = str(candidate.get('order_id') or '').strip()
+                if not order_id:
+                    continue
+
+                incoming_status = normalize_order_history_status(candidate.get('order_status'))
+                existing_order = db_manager.get_order_by_id(order_id) or {}
+                current_status = db_manager._normalize_order_status(existing_order.get('order_status'))
+
+                should_refresh_detail = (
+                    incoming_status == 'pending_ship' and
+                    current_status not in {'shipped', 'completed', 'partial_success', 'partial_pending_finalize'}
+                )
+
+                if not existing_order:
+                    if self._save_recent_order_candidate(candidate):
+                        logger.warning(
+                            f"【{self.cookie_id}】近期订单巡检补录漏单: "
+                            f"order_id={order_id}, status={incoming_status or 'unknown'}"
+                        )
+                        recovered_count += 1
+
+                if should_refresh_detail:
+                    await self.fetch_order_detail_info(
+                        order_id=order_id,
+                        item_id=str(candidate.get('item_id') or '').strip() or None,
+                        buyer_id=str(candidate.get('buyer_id') or '').strip() or None,
+                        sid=str(candidate.get('sid') or '').strip() or None,
+                        buyer_nick=str(candidate.get('buyer_nick') or '').strip() or None,
+                        buyer_id_source='recent_order_watchdog',
+                        force_refresh=True,
+                    )
+                    latest_order = db_manager.get_order_by_id(order_id) or {}
+                    latest_status = db_manager._normalize_order_status(latest_order.get('order_status'))
+                    if latest_status == 'pending_ship':
+                        if await self._auto_deliver_recovered_pending_order(
+                            latest_order,
+                            fallback_order=candidate,
+                            source='recent_order_watchdog',
+                        ):
+                            recovered_count += 1
+                    elif latest_status and latest_status != current_status:
+                        logger.info(
+                            f"【{self.cookie_id}】近期订单巡检刷新后状态变化: "
+                            f"order_id={order_id}, {current_status or 'missing'} -> {latest_status}"
+                        )
+                        recovered_count += 1
+
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except OrderHistorySyncError as recent_sync_error:
+            if recent_sync_error.kind in {'permission_denied', 'session_expired'}:
+                self._recent_order_watchdog_disabled_until = time.time() + 6 * 3600
+                logger.warning(
+                    f"【{self.cookie_id}】近期订单巡检不可用，进入 6 小时退避: "
+                    f"kind={recent_sync_error.kind}, error={self._safe_str(recent_sync_error)}"
+                )
+            else:
+                logger.warning(f"【{self.cookie_id}】近期订单巡检失败: {self._safe_str(recent_sync_error)}")
+        except Exception as recent_error:
+            logger.warning(f"【{self.cookie_id}】近期订单巡检失败: {self._safe_str(recent_error)}")
+        finally:
+            await history_fetcher.close()
+
+        return recovered_count
+
 
     def _load_json_dict(self, raw_value: Any) -> Dict[str, Any]:
         """安全解析 JSON 对象。"""
@@ -4343,6 +4826,12 @@ class XianyuLive:
         normalized_text = str(raw_text or '').strip()
         if not normalized_text:
             return None
+
+        source_key = str(source or '').rsplit('.', 1)[-1].lower()
+        if source_key in {'orderid', 'bizorderid', 'order_id', 'tradeid', 'trade_id'}:
+            direct_numeric = re.fullmatch(r'\d{10,}', normalized_text)
+            if direct_numeric:
+                return direct_numeric.group(0)
 
         patterns = [
             r'orderId(?:=|:|%3[Dd]|\\u003[dD])\s*"?(\d{10,})',
@@ -12428,6 +12917,46 @@ class XianyuLive:
                         raise
                     except Exception as risk_clean_e:
                         logger.error(f"【{self.cookie_id}】清理超时风控日志时出错: {risk_clean_e}")
+
+                    # 补偿刷新超时仍停留在 processing/pending_payment 的订单。
+                    # 只在平台详情确认待发货时才触发自动发货，避免未付款误发。
+                    try:
+                        if hasattr(self.__class__, '_last_unsettled_order_recovery_time'):
+                            last_order_recovery = self.__class__._last_unsettled_order_recovery_time
+                        else:
+                            self.__class__._last_unsettled_order_recovery_time = 0
+                            last_order_recovery = 0
+
+                        current_time = time.time()
+                        if current_time - last_order_recovery > 600:
+                            recovered_count = await self._recover_stale_unsettled_orders(
+                                older_than_minutes=10,
+                                limit=5
+                            )
+                            if recovered_count > 0:
+                                logger.warning(f"【{self.cookie_id}】超时未结算订单补偿处理完成，处理 {recovered_count} 个订单")
+                            self.__class__._last_unsettled_order_recovery_time = current_time
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as order_recovery_e:
+                        logger.error(f"【{self.cookie_id}】补偿刷新超时订单时出错: {self._safe_str(order_recovery_e)}")
+
+                    # 近期订单巡检：补偿 WebSocket 漏消息导致的“平台有订单、本地没入库”。
+                    # 只扫描少量最新订单，且只有详情确认待发货时才推进自动发货。
+                    try:
+                        last_recent_order_recovery = getattr(self, '_last_recent_order_recovery_time', 0)
+                        current_time = time.time()
+                        if current_time - last_recent_order_recovery > 900:
+                            recent_recovered_count = await self._recover_recent_missing_orders(max_orders=10)
+                            if recent_recovered_count > 0:
+                                logger.warning(
+                                    f"【{self.cookie_id}】近期订单巡检补偿完成，处理 {recent_recovered_count} 个订单"
+                                )
+                            self._last_recent_order_recovery_time = current_time
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as recent_order_recovery_e:
+                        logger.error(f"【{self.cookie_id}】近期订单巡检补偿出错: {self._safe_str(recent_order_recovery_e)}")
 
                     # 清理数据库历史数据（每天一次，保留90天数据）
                     # 为避免所有实例同时执行，只让第一个实例执行

@@ -16085,6 +16085,92 @@ async function refreshOrders() {
     showToast('订单列表已刷新', 'success');
 }
 
+async function openOrderRecoverModal() {
+    try {
+        const modalElement = document.getElementById('orderRecoverModal');
+        if (!modalElement) return;
+
+        const accounts = await fetchOrderSyncAccounts(true);
+        const select = document.getElementById('orderRecoverCookieId');
+        renderOrderAccountOptions(select, accounts, { includeAllOption: false });
+
+        const pageFilterValue = document.getElementById('orderCookieFilter')?.value || '';
+        if (select && pageFilterValue && Array.from(select.options).some(option => option.value === pageFilterValue)) {
+            select.value = pageFilterValue;
+        }
+
+        ['orderRecoverOrderId', 'orderRecoverItemId', 'orderRecoverBuyerId'].forEach(id => {
+            const input = document.getElementById(id);
+            if (input) input.value = '';
+        });
+        const autoDeliver = document.getElementById('orderRecoverAutoDeliver');
+        if (autoDeliver) autoDeliver.checked = true;
+
+        bootstrap.Modal.getOrCreateInstance(modalElement).show();
+    } catch (error) {
+        console.error('打开订单补抓弹窗失败:', error);
+        showToast('加载订单补抓配置失败', 'danger');
+    }
+}
+
+async function recoverOrderById() {
+    const cookieId = String(document.getElementById('orderRecoverCookieId')?.value || '').trim();
+    const orderId = String(document.getElementById('orderRecoverOrderId')?.value || '').trim();
+    const itemId = String(document.getElementById('orderRecoverItemId')?.value || '').trim();
+    const buyerId = String(document.getElementById('orderRecoverBuyerId')?.value || '').trim();
+    const autoDeliver = Boolean(document.getElementById('orderRecoverAutoDeliver')?.checked);
+
+    if (!cookieId) {
+        showToast('请选择账号', 'warning');
+        return;
+    }
+    if (!/^\d{10,}$/.test(orderId)) {
+        showToast('请输入正确的订单ID', 'warning');
+        return;
+    }
+
+    const submitBtn = document.getElementById('orderRecoverSubmitBtn');
+    const originalHtml = submitBtn?.innerHTML || '';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>补抓中';
+    }
+
+    try {
+        const response = await fetch(`${apiBase}/api/orders/recover`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                cookie_id: cookieId,
+                order_id: orderId,
+                item_id: itemId || null,
+                buyer_id: buyerId || null,
+                auto_deliver: autoDeliver
+            })
+        });
+
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.success) {
+            throw new Error(result.detail || result.message || '订单补抓失败');
+        }
+
+        showToast(result.message || '订单补抓完成', result.delivered ? 'success' : 'info');
+        bootstrap.Modal.getInstance(document.getElementById('orderRecoverModal'))?.hide();
+        await refreshOrdersData();
+    } catch (error) {
+        console.error('订单补抓失败:', error);
+        showToast(error.message || '订单补抓失败', 'danger');
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalHtml || '<i class="bi bi-search"></i> 开始补抓';
+        }
+    }
+}
+
 function getOrderPrimarySortTime(order) {
     const platformCreatedAt = String(order?.platform_created_at || '').trim();
     if (platformCreatedAt) {

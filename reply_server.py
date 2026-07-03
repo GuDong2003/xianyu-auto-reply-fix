@@ -11793,6 +11793,16 @@ class OrderHistorySyncRequest(BaseModel):
     fetch_details: bool = True
 
 
+class OrderRecoverRequest(BaseModel):
+    cookie_id: str
+    order_id: str
+    item_id: Optional[str] = None
+    buyer_id: Optional[str] = None
+    buyer_nick: Optional[str] = None
+    sid: Optional[str] = None
+    auto_deliver: bool = True
+
+
 def _normalize_history_optional_text(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -12207,6 +12217,84 @@ def cancel_order_history_sync(job_id: str, current_user: Dict[str, Any] = Depend
         task.cancel()
 
     return {"success": True, "data": _create_order_history_sync_job_snapshot(job)}
+
+
+@app.post('/api/orders/recover')
+async def recover_order_by_id(request: OrderRecoverRequest, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """按已知订单号强制补抓订单详情；详情确认待发货时可触发补偿发货。"""
+    try:
+        import cookie_manager
+
+        cookie_id = _ensure_cookie_access(request.cookie_id, current_user)
+        order_id = _normalize_history_optional_text(request.order_id)
+        if not order_id or not re.fullmatch(r'\d{10,}', order_id):
+            raise HTTPException(status_code=400, detail='订单ID格式不正确')
+
+        xianyu_instance = cookie_manager.manager.get_xianyu_instance(cookie_id) if cookie_manager.manager else None
+        if not xianyu_instance:
+            return {"success": False, "recovered": False, "delivered": False, "message": f"账号 {cookie_id} 未运行，请先启动账号"}
+
+        before_order = db_manager.get_order_by_id(order_id) or {}
+        before_status = normalize_order_status_value(before_order.get('order_status')) if before_order else None
+
+        detail_result = await xianyu_instance.fetch_order_detail_info(
+            order_id=order_id,
+            item_id=_normalize_history_optional_text(request.item_id) or before_order.get('item_id'),
+            buyer_id=_normalize_history_optional_text(request.buyer_id) or before_order.get('buyer_id'),
+            sid=_normalize_history_optional_text(request.sid) or before_order.get('sid'),
+            buyer_nick=_normalize_history_optional_text(request.buyer_nick) or before_order.get('buyer_nick'),
+            buyer_id_source='manual_order_recover',
+            force_refresh=True,
+        )
+        if not detail_result:
+            return {"success": False, "recovered": False, "delivered": False, "message": "订单详情补抓失败，请确认订单ID和账号是否匹配"}
+
+        latest_order = db_manager.get_order_by_id(order_id) or {}
+        latest_status = normalize_order_status_value(latest_order.get('order_status')) if latest_order else None
+        delivered = False
+        if request.auto_deliver and latest_status == 'pending_ship':
+            delivered = bool(await xianyu_instance._auto_deliver_recovered_pending_order(
+                latest_order,
+                fallback_order={
+                    'order_id': order_id,
+                    'item_id': _normalize_history_optional_text(request.item_id),
+                    'buyer_id': _normalize_history_optional_text(request.buyer_id),
+                    'buyer_nick': _normalize_history_optional_text(request.buyer_nick),
+                    'sid': _normalize_history_optional_text(request.sid),
+                },
+                source='manual_order_recover',
+            ))
+
+        publish_order_update_event(order_id, source='manual_order_recover')
+        log_with_user(
+            'info',
+            f"按订单ID补抓完成: cookie_id={cookie_id}, order_id={order_id}, status={before_status}->{latest_status}, delivered={delivered}",
+            current_user,
+        )
+
+        if latest_status == 'pending_ship' and request.auto_deliver and not delivered:
+            message = '订单已补抓为待发货，但自动发货未完成，请查看发货日志'
+        elif delivered:
+            message = '订单已补抓并触发自动发货'
+        else:
+            message = f"订单已补抓，当前状态: {latest_status or '未知'}"
+
+        return {
+            "success": True,
+            "recovered": True,
+            "delivered": delivered,
+            "order": latest_order,
+            "old_status": before_status,
+            "new_status": latest_status,
+            "message": message,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        log_with_user('error', f"按订单ID补抓失败: {exc}", current_user)
+        logger.error(f"按订单ID补抓异常堆栈: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"按订单ID补抓失败: {exc}")
 
 
 @app.get('/api/orders')

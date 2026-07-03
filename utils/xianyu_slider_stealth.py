@@ -19,6 +19,7 @@ import subprocess
 import re
 import sys
 import socket
+import signal
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright as playwright_sync_playwright, ElementHandle
@@ -1044,6 +1045,7 @@ class XianyuSliderStealth:
                     self.browser_channel = detected_channel
         self.playwright = None
         self._playwright_thread_id: Optional[int] = None
+        self._browser_pid: Optional[int] = None
         # 内层 _detect_qr_code_verification 滑块自救成功后的兜底回流标记，由 run() 入口重置
         self._post_recovery_success: bool = False
         self._post_recovery_cookies = None
@@ -2371,6 +2373,7 @@ class XianyuSliderStealth:
                     )
                     launched_with_persistent_profile = True
                     self.browser = None
+                    self._browser_pid = self._extract_browser_pid(self.context)
                 except Exception as persistent_launch_error:
                     if not self._is_profile_in_use_launch_error(persistent_launch_error):
                         raise
@@ -2403,6 +2406,7 @@ class XianyuSliderStealth:
             if not launched_with_persistent_profile:
                 try:
                     self.browser = self.playwright.chromium.launch(**launch_options)
+                    self._browser_pid = self._extract_browser_pid(self.browser)
                 except Exception as launch_error:
                     if self.headless and (launch_options.get("executable_path") or launch_options.get("channel")):
                         fallback_options = dict(launch_options)
@@ -2412,6 +2416,7 @@ class XianyuSliderStealth:
                             f"【{self.pure_user_id}】指定浏览器无头启动失败，回退到 Playwright Chromium: {launch_error}"
                         )
                         self.browser = self.playwright.chromium.launch(**fallback_options)
+                        self._browser_pid = self._extract_browser_pid(self.browser)
                     else:
                         raise
             
@@ -2482,6 +2487,8 @@ class XianyuSliderStealth:
                 self.browser = None
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】清理浏览器时出错: {e}")
+
+        self._force_kill_browser_process_tree("init_failure_cleanup")
         
         try:
             if hasattr(self, 'playwright') and self.playwright:
@@ -9781,6 +9788,95 @@ class XianyuSliderStealth:
             else:
                 logger.warning(f"【{self.pure_user_id}】{action} {obj_name} 时出错: {e}")
 
+    def _extract_browser_pid(self, runtime_obj) -> Optional[int]:
+        """尽量从 Playwright runtime 对象上提取浏览器进程 PID。"""
+        try:
+            process = getattr(runtime_obj, "process", None)
+            pid = getattr(process, "pid", None)
+            if pid:
+                return int(pid)
+        except Exception:
+            pass
+        try:
+            browser = getattr(runtime_obj, "browser", None)
+            process = getattr(browser, "process", None) if browser else None
+            pid = getattr(process, "pid", None)
+            if pid:
+                return int(pid)
+        except Exception:
+            pass
+        return None
+
+    def _collect_process_tree(self, root_pid: int) -> List[int]:
+        """收集给定 PID 的全部子孙进程，避免残留 Chromium 进程树。"""
+        try:
+            output = subprocess.check_output(
+                ["ps", "-eo", "pid=,ppid="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return [root_pid]
+
+        parent_map: Dict[int, List[int]] = {}
+        for line in output.splitlines():
+            parts = line.strip().split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+            except Exception:
+                continue
+            parent_map.setdefault(ppid, []).append(pid)
+
+        to_visit = [root_pid]
+        seen = set()
+        ordered: List[int] = []
+        while to_visit:
+            pid = to_visit.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            ordered.append(pid)
+            to_visit.extend(parent_map.get(pid, []))
+        return ordered
+
+    def _force_kill_browser_process_tree(self, reason: str = "") -> bool:
+        """兜底终止浏览器进程树，用于 close 失败或页面崩溃后的残留清理。"""
+        pid = self._browser_pid
+        if not pid:
+            return False
+
+        reason_suffix = f"（{reason}）" if reason else ""
+        try:
+            process_tree = self._collect_process_tree(int(pid))
+            if not process_tree:
+                return False
+
+            logger.warning(
+                f"【{self.pure_user_id}】开始兜底清理浏览器进程树{reason_suffix}: {process_tree}"
+            )
+
+            for signal_name, sig in (("TERM", signal.SIGTERM), ("KILL", signal.SIGKILL)):
+                for proc_pid in process_tree:
+                    try:
+                        os.kill(proc_pid, sig)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError as e:
+                        logger.warning(f"【{self.pure_user_id}】终止进程 {proc_pid} 失败: {e}")
+                    except Exception as e:
+                        logger.debug(f"【{self.pure_user_id}】清理进程 {proc_pid} 时出错: {e}")
+
+                time.sleep(0.4 if signal_name == "TERM" else 0.2)
+
+            self._browser_pid = None
+            return True
+        except Exception as e:
+            logger.warning(f"【{self.pure_user_id}】兜底清理浏览器进程树失败: {e}")
+            return False
+
     def close_browser(self):
         """安全关闭浏览器并清理资源"""
         logger.info(f"【{self.pure_user_id}】开始清理资源...")
@@ -9812,6 +9908,9 @@ class XianyuSliderStealth:
             # 不论 stop 成功与否，都把引用置空，避免下一次 close_browser 又对死引用操作
             self.playwright = None
             self._playwright_thread_id = None
+
+        # 再补一层浏览器子进程兜底清理，防止 browser.close()/playwright.stop() 没有真正回收干净
+        self._force_kill_browser_process_tree("close_browser")
 
         # 清理临时目录
         try:
@@ -10995,6 +11094,7 @@ class XianyuSliderStealth:
 
             if not browser:
                 browser = context.browser
+            self._browser_pid = self._extract_browser_pid(browser or context)
             page = context.new_page()
             self._apply_headless_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}
@@ -11897,12 +11997,15 @@ class XianyuSliderStealth:
 
                     if close_thread.is_alive():
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器超时，改为后台继续清理，避免阻塞密码登录会话收尾")
+                        self._force_kill_browser_process_tree("password_login_close_timeout")
                     elif close_errors:
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器时出现异常: {close_errors}")
+                        self._force_kill_browser_process_tree("password_login_close_error")
                     elif effective_clean_context:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，干净上下文已销毁")
                     else:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
+                        self._browser_pid = None
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
 
@@ -12391,19 +12494,30 @@ class XianyuSliderStealth:
                 
                 if success:
                     logger.info(f"【{self.pure_user_id}】滑块验证成功")
-                    
+
                     # 等待页面完全加载和跳转，让新的cookie生效（快速模式）
                     try:
                         logger.info(f"【{self.pure_user_id}】等待页面加载...")
                         time.sleep(1)  # 快速等待，从3秒减少到1秒
-                        
+
                         # 等待页面跳转或刷新
                         self.page.wait_for_load_state("networkidle", timeout=10000)
                         time.sleep(0.5)  # 快速确认，从2秒减少到0.5秒
-                        
+
                         logger.info(f"【{self.pure_user_id}】页面加载完成，开始获取cookie")
                     except Exception as e:
-                        logger.warning(f"【{self.pure_user_id}】等待页面加载时出错: {str(e)}")
+                        error_text = str(e)
+                        logger.warning(f"【{self.pure_user_id}】等待页面加载时出错: {error_text}")
+                        lowered_error = error_text.lower()
+                        if "page crashed" in lowered_error or "target crashed" in lowered_error:
+                            self.last_login_error = f"浏览器页面崩溃: {error_text}"
+                            self.last_verification_feedback = {
+                                "status": "error",
+                                "source": "page_crashed",
+                                "message": error_text,
+                            }
+                            self._save_debug_snapshot("page_crashed", getattr(self, "_detected_slider_frame", None))
+                            return False, None
 
                     monitor_page = self._select_monitor_page(self.context, self.page) or self.page
                     has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
@@ -12419,7 +12533,7 @@ class XianyuSliderStealth:
                         if verification_result:
                             return True, verification_result
                         return False, None
-                    
+
                     # 在关闭浏览器前获取cookie
                     try:
                         cookies = self._get_cookies_after_success()
@@ -12450,7 +12564,7 @@ class XianyuSliderStealth:
                         )
                         return True, self._post_recovery_cookies
                     self._save_debug_snapshot("run_failed", getattr(self, "_detected_slider_frame", None))
-                
+
                 return success, cookies
             else:
                 logger.info(f"【{self.pure_user_id}】页面内容不包含验证码相关关键词，可能不需要验证")
@@ -12471,7 +12585,14 @@ class XianyuSliderStealth:
                 return True, None
                 
         except Exception as e:
-            logger.error(f"【{self.pure_user_id}】执行过程中出错: {str(e)}")
+            error_text = str(e)
+            logger.error(f"【{self.pure_user_id}】执行过程中出错: {error_text}")
+            self.last_login_error = error_text
+            self.last_verification_feedback = {
+                "status": "error",
+                "source": "exception",
+                "message": error_text,
+            }
             return False, None
         finally:
             # 关闭浏览器

@@ -6532,8 +6532,9 @@ async def get_account_face_verification_screenshot(
                     }
 
         latest_verification_log = _get_latest_verification_risk_log_for_account(account_id)
-        if latest_verification_log and str(latest_verification_log.get('processing_status') or '').strip().lower() == 'failed':
-            if _is_timed_out_verification_risk_log(latest_verification_log):
+        if latest_verification_log:
+            log_status = str(latest_verification_log.get('processing_status') or '').strip().lower()
+            if log_status == 'failed' and _is_timed_out_verification_risk_log(latest_verification_log):
                 timeout_message = (
                     str(latest_verification_log.get('error_message') or '').strip()
                     or '当前验证页面已超时/失效，请重新发起验证'
@@ -6543,7 +6544,14 @@ async def get_account_face_verification_screenshot(
                     'success': False,
                     'message': timeout_message
                 }
-        
+            if log_status == 'success':
+                # 最近一次验证已完成，历史截图仅作留档，不应再当成待处理验证展示
+                log_with_user('info', f"账号 {account_id} 最新验证已完成，无待处理验证", current_user)
+                return {
+                    'success': False,
+                    'message': '最近一次验证已完成，当前没有待处理的验证'
+                }
+
         # 获取该账号的验证截图
         screenshots_dir = os.path.join(static_dir, 'uploads', 'images')
         pattern_jpg = os.path.join(screenshots_dir, f'face_verify_{account_id}_*.jpg')

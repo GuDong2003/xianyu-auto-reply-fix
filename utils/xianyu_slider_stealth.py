@@ -5582,6 +5582,20 @@ class XianyuSliderStealth:
 
         self._log_cookie_snapshot_integrity(cookies_dict, f"{scene}完成后")
         logger.success(f"【{self.pure_user_id}】✅ {scene}后Cookie获取完成，字段数: {len(cookies_dict)}")
+
+        # 验证成功后回填该账号悬挂在 processing 状态的验证类风控日志，
+        # 否则前端"查看验证截图"会一直把历史截图当成待处理验证展示
+        try:
+            from db_manager import db_manager as _db
+            resolved_count = _db.resolve_pending_verification_risk_logs(
+                self.pure_user_id,
+                processing_result=f'{scene}成功，验证已完成',
+            )
+            if resolved_count:
+                logger.info(f"【{self.pure_user_id}】已回填 {resolved_count} 条待处理验证风控日志为成功")
+        except Exception as resolve_err:
+            logger.warning(f"【{self.pure_user_id}】回填验证风控日志状态失败: {resolve_err}")
+
         cleared_pending_markers = []
         sanitized_cookies = dict(cookies_dict)
         for key in self._IDENTITY_VERIFY_PENDING_COOKIE_FIELDS:

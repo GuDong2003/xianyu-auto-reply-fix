@@ -9238,6 +9238,40 @@ Cookie数量: {cookie_count}
             logger.error(f"更新风控日志失败: {e}")
             return False
 
+    def resolve_pending_verification_risk_logs(self, cookie_id: str,
+                                               processing_result: str = '验证已完成',
+                                               result_code: str = 'verification_resolved') -> int:
+        """将指定账号所有悬挂在 processing/pending 状态的验证类风控日志批量置为成功。
+
+        人脸/扫码等验证在检测阶段会写入 processing 状态日志，验证完成后若不回填，
+        前端"查看验证截图"会一直把历史截图当成待处理验证展示。
+
+        Returns:
+            int: 更新的记录数
+        """
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE risk_control_logs
+                    SET processing_status = 'success',
+                        processing_result = ?,
+                        result_code = ?,
+                        error_message = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE cookie_id = ?
+                      AND event_type IN ('face_verify', 'qr_verify', 'sms_verify', 'unknown')
+                      AND processing_status IN ('processing', 'pending')
+                    """,
+                    (processing_result, result_code, str(cookie_id)),
+                )
+                self.conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            logger.error(f"批量回填验证风控日志状态失败: {e}")
+            return 0
+
     def get_risk_control_logs(self, cookie_id: str = None, processing_status: str = None,
                               event_type: str = None, trigger_scene: str = None,
                               session_id: str = None, result_code: str = None,

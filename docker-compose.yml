@@ -14,6 +14,8 @@ services:
     image: ghcr.io/gudong2003/xianyu-auto-reply-fix:latest
     container_name: xianyu-auto-reply-fix
     restart: unless-stopped
+    # 内置 init 进程回收僵尸进程（chrome 子进程退出后无人 reap 会变 defunct，长期累积）
+    init: true
     # 使用root用户避免权限问题
     user: "0:0"
     # 使用 bash 执行脚本，避免 Windows 行尾格式问题

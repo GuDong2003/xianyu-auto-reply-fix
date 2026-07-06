@@ -9788,7 +9788,7 @@ class XianyuSliderStealth:
             else:
                 logger.warning(f"【{self.pure_user_id}】{action} {obj_name} 时出错: {e}")
 
-    def _extract_browser_pid(self, runtime_obj) -> Optional[int]:
+    def _extract_browser_pid(self, runtime_obj, playwright_obj=None) -> Optional[int]:
         """尽量从 Playwright runtime 对象上提取浏览器进程 PID。"""
         try:
             process = getattr(runtime_obj, "process", None)
@@ -9803,6 +9803,18 @@ class XianyuSliderStealth:
             pid = getattr(process, "pid", None)
             if pid:
                 return int(pid)
+        except Exception:
+            pass
+        # Python sync API 的 Browser/Context 并不暴露 process 属性，上面两条路径
+        # 实际拿不到 PID（永远返回 None），导致强杀兜底静默失效、浏览器进程常驻泄漏。
+        # 回退为提取 Playwright node driver 的子进程 PID：所有 chrome 进程都挂在
+        # driver 之下，按 driver 进程树清理可以等效覆盖浏览器进程树。
+        try:
+            pw = playwright_obj or getattr(self, "playwright", None)
+            impl = getattr(pw, "_impl_obj", pw)
+            proc = impl._connection._transport._proc
+            if proc is not None and proc.poll() is None:
+                return int(proc.pid)
         except Exception:
             pass
         return None
@@ -9884,6 +9896,17 @@ class XianyuSliderStealth:
         # 先释放槽位，避免后续任一清理步骤卡死把同账号任务永久堵住。
         self._release_concurrency_slot("close_browser开始")
 
+        # 看门狗：优雅清理超过20秒仍未完成（如 close()/stop() 同线程挂死在
+        # 死循环页面上）时，直接按进程树强杀兜底。强杀会让阻塞的 sync 调用
+        # 抛错并被 _safe_pw_dispose 吸收，close_browser 得以继续走完。
+        close_watchdog = threading.Timer(
+            20.0,
+            self._force_kill_browser_process_tree,
+            args=("close_browser_watchdog",),
+        )
+        close_watchdog.daemon = True
+        close_watchdog.start()
+
         # 清理页面 / 上下文 / 浏览器：跨线程 greenlet 错误由 _safe_pw_dispose 统一吸收
         self._safe_pw_dispose('页面', getattr(self, 'page', None), action='close')
         self.page = None
@@ -9920,6 +9943,9 @@ class XianyuSliderStealth:
                 self.temp_dir = None  # 设置为None，防止重复清理
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】清理临时目录时出错: {e}")
+
+        # 优雅清理按时走完，取消看门狗
+        close_watchdog.cancel()
 
         # 再兜底释放一次，兼容前面提前释放失败的极端情况。
         self._release_concurrency_slot("close_browser收尾")
@@ -11094,7 +11120,7 @@ class XianyuSliderStealth:
 
             if not browser:
                 browser = context.browser
-            self._browser_pid = self._extract_browser_pid(browser or context)
+            self._browser_pid = self._extract_browser_pid(browser or context, playwright)
             page = context.new_page()
             self._apply_headless_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}

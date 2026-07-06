@@ -342,8 +342,14 @@ class CookieManager:
     def _start_cookie_task(self, cookie_id: str):
         """启动指定Cookie的任务"""
         if cookie_id in self.tasks:
-            logger.warning(f"Cookie任务已存在，跳过启动: {cookie_id}")
-            return
+            existing_task = self.tasks.get(cookie_id)
+            if existing_task is not None and not existing_task.done():
+                logger.warning(f"Cookie任务已存在，跳过启动: {cookie_id}")
+                return
+            # 任务已结束但引用残留（如任务启动瞬间读到旧的"禁用"状态而立即退出），
+            # 不清理的话该账号任务将永远无法重启
+            logger.warning(f"检测到已结束的残留Cookie任务引用，清理后重新启动: {cookie_id}")
+            self.tasks.pop(cookie_id, None)
 
         cookie_value = self.cookies.get(cookie_id)
         if not cookie_value:

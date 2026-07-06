@@ -21,7 +21,7 @@ import sys
 import socket
 import signal
 from datetime import datetime
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
 from playwright.sync_api import sync_playwright as playwright_sync_playwright, ElementHandle
 try:
     from patchright.sync_api import sync_playwright as patchright_sync_playwright

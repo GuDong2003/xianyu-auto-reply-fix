@@ -9826,9 +9826,18 @@ class XianyuSliderStealth:
         try:
             pw = playwright_obj or getattr(self, "playwright", None)
             impl = getattr(pw, "_impl_obj", pw)
-            proc = impl._connection._transport._proc
-            if proc is not None and proc.poll() is None:
-                return int(proc.pid)
+            proc = getattr(getattr(getattr(impl, "_connection", None), "_transport", None), "_proc", None)
+            pid = getattr(proc, "pid", None)
+            if proc is not None and pid:
+                # sync API 下 _proc 实际是 asyncio.subprocess.Process：
+                # 只有 returncode 没有 poll()，需要兼容两种存活判断
+                poll = getattr(proc, "poll", None)
+                if callable(poll):
+                    alive = poll() is None
+                else:
+                    alive = getattr(proc, "returncode", None) is None
+                if alive:
+                    return int(pid)
         except Exception:
             pass
         return None
@@ -9921,45 +9930,47 @@ class XianyuSliderStealth:
         close_watchdog.daemon = True
         close_watchdog.start()
 
-        # 清理页面 / 上下文 / 浏览器：跨线程 greenlet 错误由 _safe_pw_dispose 统一吸收
-        self._safe_pw_dispose('页面', getattr(self, 'page', None), action='close')
-        self.page = None
-
-        self._safe_pw_dispose('上下文', getattr(self, 'context', None), action='close')
-        self.context = None
-
-        self._safe_pw_dispose('浏览器', getattr(self, 'browser', None), action='close')
-        self.browser = None
-
-        # 停止 Playwright（_stop_playwright_with_timeout 内部已做跨线程保护）
         try:
-            if hasattr(self, 'playwright') and self.playwright:
-                stopped = self._stop_playwright_with_timeout()
-                if stopped:
-                    logger.info(f"【{self.pure_user_id}】Playwright已停止")
-                else:
-                    logger.warning(f"【{self.pure_user_id}】Playwright未能在当前线程停止，已放弃 stop() 仅置空引用")
-        except Exception as e:
-            logger.warning(f"【{self.pure_user_id}】停止Playwright时出错: {e}")
+            # 清理页面 / 上下文 / 浏览器：跨线程 greenlet 错误由 _safe_pw_dispose 统一吸收
+            self._safe_pw_dispose('页面', getattr(self, 'page', None), action='close')
+            self.page = None
+
+            self._safe_pw_dispose('上下文', getattr(self, 'context', None), action='close')
+            self.context = None
+
+            self._safe_pw_dispose('浏览器', getattr(self, 'browser', None), action='close')
+            self.browser = None
+
+            # 停止 Playwright（_stop_playwright_with_timeout 内部已做跨线程保护）
+            try:
+                if hasattr(self, 'playwright') and self.playwright:
+                    stopped = self._stop_playwright_with_timeout()
+                    if stopped:
+                        logger.info(f"【{self.pure_user_id}】Playwright已停止")
+                    else:
+                        logger.warning(f"【{self.pure_user_id}】Playwright未能在当前线程停止，已放弃 stop() 仅置空引用")
+            except Exception as e:
+                logger.warning(f"【{self.pure_user_id}】停止Playwright时出错: {e}")
+            finally:
+                # 不论 stop 成功与否，都把引用置空，避免下一次 close_browser 又对死引用操作
+                self.playwright = None
+                self._playwright_thread_id = None
+
+            # 再补一层浏览器子进程兜底清理，防止 browser.close()/playwright.stop() 没有真正回收干净
+            self._force_kill_browser_process_tree("close_browser")
+
+            # 清理临时目录
+            try:
+                if hasattr(self, 'temp_dir') and self.temp_dir:
+                    shutil.rmtree(self.temp_dir, ignore_errors=True)
+                    logger.debug(f"【{self.pure_user_id}】临时目录已清理: {self.temp_dir}")
+                    self.temp_dir = None  # 设置为None，防止重复清理
+            except Exception as e:
+                logger.warning(f"【{self.pure_user_id}】清理临时目录时出错: {e}")
         finally:
-            # 不论 stop 成功与否，都把引用置空，避免下一次 close_browser 又对死引用操作
-            self.playwright = None
-            self._playwright_thread_id = None
-
-        # 再补一层浏览器子进程兜底清理，防止 browser.close()/playwright.stop() 没有真正回收干净
-        self._force_kill_browser_process_tree("close_browser")
-
-        # 清理临时目录
-        try:
-            if hasattr(self, 'temp_dir') and self.temp_dir:
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-                logger.debug(f"【{self.pure_user_id}】临时目录已清理: {self.temp_dir}")
-                self.temp_dir = None  # 设置为None，防止重复清理
-        except Exception as e:
-            logger.warning(f"【{self.pure_user_id}】清理临时目录时出错: {e}")
-
-        # 优雅清理按时走完，取消看门狗
-        close_watchdog.cancel()
+            # 放在 finally：即使清理中途抛出未捕获异常，也保证取消看门狗，
+            # 避免 20 秒后按已过期的 _browser_pid 误杀后续新会话的进程树
+            close_watchdog.cancel()
 
         # 再兜底释放一次，兼容前面提前释放失败的极端情况。
         self._release_concurrency_slot("close_browser收尾")

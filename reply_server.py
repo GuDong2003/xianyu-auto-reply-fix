@@ -5251,6 +5251,31 @@ def _get_latest_verification_risk_log_for_account(account_id: str) -> Optional[D
     return None
 
 
+def _get_latest_risk_log_epoch_for_account(account_id: str) -> Optional[float]:
+    """返回该账号最近一次风控事件（任意类型，含 slider_captcha）的时间戳(epoch秒)。
+
+    用于判断历史验证截图是否已过期：只要有比截图更新的风控事件，
+    就说明当前的问题不是那次截图对应的验证（如滑块被风控硬拒时不产生新截图），
+    此时不应把旧截图当成待处理验证展示。
+    """
+    from datetime import datetime
+    logs = db_manager.get_risk_control_logs(cookie_id=str(account_id), limit=5)
+    latest = None
+    for log in logs:
+        raw = str(log.get('updated_at') or log.get('created_at') or '').strip()
+        if not raw:
+            continue
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f'):
+            try:
+                ts = datetime.strptime(raw, fmt).timestamp()
+                if latest is None or ts > latest:
+                    latest = ts
+                break
+            except ValueError:
+                continue
+    return latest
+
+
 def _build_face_verification_screenshot_info(account_id: str, file_path: str) -> Dict[str, Any]:
     from datetime import datetime
 
@@ -6577,10 +6602,31 @@ async def get_account_face_verification_screenshot(
         
         # 获取最新的截图
         latest_file = max(screenshot_files, key=os.path.getmtime)
+
+        # 新鲜度门槛：若最近一次风控事件（含 slider_captcha 等不产生截图的类型）
+        # 比这张截图还新，说明当前问题不是这张截图对应的验证（如滑块被风控硬拒），
+        # 旧截图不应再当成待处理验证展示，避免"当前提醒被历史截图覆盖"的误导
+        latest_risk_epoch = _get_latest_risk_log_epoch_for_account(account_id)
+        if latest_risk_epoch is not None:
+            try:
+                screenshot_mtime = os.path.getmtime(latest_file)
+            except OSError:
+                screenshot_mtime = 0
+            if latest_risk_epoch > screenshot_mtime + 60:
+                log_with_user(
+                    'info',
+                    f"账号 {account_id} 最新风控事件晚于历史截图，判定截图已过期，不展示",
+                    current_user,
+                )
+                return {
+                    'success': False,
+                    'message': '当前没有待处理的验证截图（最近一次风控可能是滑块/Token刷新，已自动处理或需等待风控冷却）'
+                }
+
         screenshot_info = _build_face_verification_screenshot_info(account_id, latest_file)
-        
+
         log_with_user('info', f"获取账号 {account_id} 的验证截图", current_user)
-        
+
         return {
             'success': True,
             'screenshot': screenshot_info

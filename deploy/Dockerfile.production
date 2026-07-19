@@ -1,0 +1,85 @@
+ARG PYTHON_IMAGE=mcr.microsoft.com/dotnet/runtime-deps:8.0-bookworm-slim@sha256:a74e3641349c4ef08b657dd8704825e05012ad1c419611fe9f5576fc422335c6
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.16@sha256:440fd6477af86a2f1b38080c539f1672cd22acb1b1a47e321dba5158ab08864d
+ARG NODEJS_VERSION=18.20.4+dfsg-1~deb12u2
+ARG X11VNC_VERSION=0.9.16-9
+FROM ${UV_IMAGE} AS uv
+FROM ${PYTHON_IMAGE} AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH=/app/.venv/bin:$PATH
+
+COPY --from=uv /uv /uvx /bin/
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock ./
+RUN UV_HTTP_TIMEOUT=30 UV_HTTP_RETRIES=3 uv sync --frozen --no-dev --no-install-project \
+    && playwright install --no-shell chromium
+
+FROM ${PYTHON_IMAGE}
+ARG NODEJS_VERSION
+ARG X11VNC_VERSION
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH=/app/.venv/bin:$PATH \
+    TZ=Asia/Shanghai
+
+WORKDIR /app
+
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /ms-playwright /ms-playwright
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      nodejs=${NODEJS_VERSION} \
+      python3 \
+      tzdata \
+      xauth \
+      x11vnc=${X11VNC_VERSION} \
+      xvfb \
+    && playwright install-deps chromium \
+    && test "$(dpkg-query -W -f='${Version}' x11vnc)" = "${X11VNC_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* /root/.cache
+
+RUN groupadd --gid 10001 xianyu \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin xianyu
+
+COPY --chown=xianyu:xianyu . /app
+RUN mkdir -p \
+      /app/data \
+      /app/logs \
+      /app/backups \
+      /app/static/uploads/images \
+      /app/trajectory_history \
+      /var/lib/xianyu/accounts \
+    && cd /app \
+    && sha256sum -c deploy/novnc.SHA256SUMS \
+    && chown -R xianyu:xianyu \
+      /app/data \
+      /app/logs \
+      /app/backups \
+      /app/static/uploads \
+      /app/static/vendor/novnc \
+      /app/trajectory_history \
+      /var/lib/xianyu
+
+ENV XIANYU_VERIFICATION_HEADLESS=true \
+    XIANYU_VERIFICATION_TTL_SECONDS=600 \
+    XIANYU_VERIFICATION_IDLE_SECONDS=300 \
+    XIANYU_VERIFICATION_FRAME_MAX_BYTES=1500000
+
+USER 10001:10001
+
+EXPOSE 8090 8091
+ENTRYPOINT ["/app/deploy/entrypoint.production.sh"]

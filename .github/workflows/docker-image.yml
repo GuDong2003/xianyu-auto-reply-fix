@@ -1,89 +1,204 @@
-name: Build and Push Docker Image
+name: Publish production image
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Image tag (e.g., v1.0.0)'
+      deploy:
+        description: Request protected production deployment handoff
+        required: false
+        type: boolean
+        default: false
+      target:
+        description: Explicit production deployment target
         required: true
-        default: 'latest'
-  release:
-    types:
-      - published
+        type: choice
+        default: control
+        options: [control, connector, all]
+
+permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  group: production-image-${{ github.event.release.tag_name || github.sha }}
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
+  quality:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/connector-quality.yml
+    with:
+      run_image_gate: false
+
+  publish:
+    needs: quality
     permissions:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+      digest: ${{ steps.publish.outputs.digest }}
+    env:
+      LOCAL_IMAGE: xianyu-connector:publish-candidate
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Login to Docker Hub
-        id: docker_hub_login
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-        continue-on-error: true
-
-      - name: Compose image list
-        id: images
+      - name: Verify vendored noVNC supply chain
         run: |
-          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          {
-            echo "list<<EOF"
-            echo "ghcr.io/${REPO_LOWER}"
-            if [ "${{ steps.docker_hub_login.outcome }}" = "success" ]; then
-              REPO_NAME=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
-              echo "docker.io/${{ secrets.DOCKER_USERNAME }}/${REPO_NAME}"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          test "$(tr -d '\r\n' < static/vendor/novnc/VERSION)" = "1.7.0"
+          sha256sum -c deploy/novnc.SHA256SUMS
+          sha256sum -c deploy/novnc-source.SHA256SUMS
+
+      - name: Validate release tag
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tag must be semantic version: $RELEASE_TAG" >&2
+            exit 2
+          fi
+
+      - name: Compose GHCR image name
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${repository}" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ steps.images.outputs.list }}
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=sha,enable=${{ github.event_name == 'push' }},format=short
+            type=sha,prefix=sha-,format=long
+            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}},enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
 
-      - name: Build and push multi-arch images
-        uses: docker/build-push-action@v5
+      - name: Build production candidate once
+        uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          file: deploy/Dockerfile.production
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.LOCAL_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Run production remote pointer E2E
+        run: >-
+          docker run --rm --platform linux/amd64 --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=128m
+          --entrypoint /app/deploy/run-remote-verification-pointer-e2e.sh
+          "$LOCAL_IMAGE"
+
+      - name: Scan tested production candidate
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        with:
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Login to GHCR after gates
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push tested image and resolve immutable digest
+        id: publish
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          sha_ref="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          pushed_sha=false
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            [[ "$tag" == ghcr.io/* ]] || {
+              echo "refusing to push non-GHCR tag: $tag" >&2
+              exit 2
+            }
+            docker tag "$LOCAL_IMAGE" "$tag"
+            docker push "$tag"
+            if [[ "$tag" == "$sha_ref" ]]; then
+              pushed_sha=true
+            fi
+          done <<< "$IMAGE_TAGS"
+          [[ "$pushed_sha" == true ]] || {
+            echo "immutable SHA tag was not generated: $sha_ref" >&2
+            exit 2
+          }
+          digest="$(
+            docker buildx imagetools inspect "$sha_ref" \
+              --format '{{json .Manifest.Digest}}' | tr -d '"'
+          )"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "registry returned invalid digest: $digest" >&2
+            exit 2
+          }
+          image="${IMAGE_NAME}@${digest}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf 'image=%s\ndigest=%s\ncommit=%s\n' \
+            "$image" "$digest" "$GITHUB_SHA" > image-digest.txt
+          {
+            echo "## Production image"
+            echo
+            echo "- Image: \`$image\`"
+            echo "- Digest: \`$digest\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable digest receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ github.sha }}
+          path: image-digest.txt
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy:
+    needs: publish
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy }}
+    environment: production
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate protected deployment handoff
+        shell: bash
+        env:
+          XIANYU_IMAGE: ${{ needs.publish.outputs.image }}
+          RELEASE_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          case "$XIANYU_IMAGE" in
+            ghcr.io/*@sha256:*) ;;
+            *) echo "deployment requires an immutable GHCR digest" >&2; exit 2 ;;
+          esac
+          case "$RELEASE_TARGET" in
+            control|connector|all) ;;
+            *) echo "invalid deployment target: $RELEASE_TARGET" >&2; exit 2 ;;
+          esac
+          echo "Validated $XIANYU_IMAGE for target $RELEASE_TARGET" >> "$GITHUB_STEP_SUMMARY"
+          echo "deployment wrapper is not configured; no server changes were made" >&2
+          exit 2

@@ -1,0 +1,26 @@
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #0a0f12;
+  color: #dbe7eb;
+  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#remoteVerificationViewport {
+  width: 100%;
+  height: calc(100% - 34px);
+  touch-action: none;
+}
+
+#remoteVerificationStatus {
+  height: 34px;
+  margin: 0;
+  padding: 7px 12px;
+  box-sizing: border-box;
+  border-top: 1px solid #2f4149;
+  color: #abc0c7;
+  background: #111b20;
+}

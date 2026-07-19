@@ -11,6 +11,8 @@ eggs/
 # Python lib directories (but not static/lib)
 lib/
 !static/lib/
+!static/vendor/novnc/vendor/pako/lib/
+!static/vendor/novnc/vendor/pako/lib/**
 lib64/
 parts/
 sdist/
@@ -316,6 +318,7 @@ config.*.yml
 .flake8
 .pylintrc
 pyproject.toml
+!/pyproject.toml
 setup.cfg
 tox.ini
 
@@ -339,6 +342,13 @@ playwright/.browsers/
 *.service
 *.timer
 systemd/
+!deploy/systemd/
+deploy/systemd/*
+!deploy/systemd/xianyu-backup.service
+!deploy/systemd/xianyu-backup.timer
+!deploy/systemd/xianyu-restore-check.service
+!deploy/systemd/xianyu-restore-check.timer
+!deploy/systemd/xianyu-egress-policy.service
 
 # 备份和归档
 archive/
@@ -405,6 +415,9 @@ personal_configs/
 *.session
 session_*
 runtime_*
+!xianyu_connector/application/runtime_reporter.py
+!xianyu_connector/application/runtime_service.py
+!xianyu_control/runtime_compat.py
 
 # 第三方服务配置
 *.service.yml
@@ -540,6 +553,7 @@ tmp_*.py
 quick_*.py
 fix_*.py
 test_*.py
+!tests/test_*.py
 check_*.py
 debug_*.py
 

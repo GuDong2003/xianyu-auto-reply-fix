@@ -1,0 +1,4 @@
+package: @novnc/novnc@1.7.0
+tarball: https://registry.npmjs.org/@novnc/novnc/-/novnc-1.7.0.tgz
+gitHead: 63107bd06d9e1f6136ff21aeda8cd62cbf0d433e
+integrity: sha512-ucEJO4T2avIRCleodk7YobZj5O2Ga2AeLfQ69A/yjG9HHba2+PDgwSkN3FttrmG+70ZGx21sElNFouK13RzyA==

@@ -32,3 +32,6 @@ entrypoint.sh text eol=lf
 *.db binary
 *.sqlite binary
 *.sqlite3 binary
+
+# Preserve upstream vendored whitespace verbatim.
+static/vendor/novnc/** -whitespace

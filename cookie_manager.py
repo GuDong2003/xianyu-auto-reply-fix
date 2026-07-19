@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import os
+import time
 from typing import Dict, List, Tuple, Optional
 from loguru import logger
 from db_manager import db_manager
@@ -145,6 +147,12 @@ class CookieManager:
             # 保存到数据库，如果没有指定user_id，则保持原有绑定关系
             db_manager.save_cookie(cookie_id, cookie_value, user_id)
 
+            if _external_connector_enabled():
+                _save_connector_secret(cookie_id, cookie_value)
+                _enqueue_connector_command(cookie_id, "start")
+                logger.info(f"已保存账号并交由独立连接器启动: {cookie_id}")
+                return
+
             # 获取实际保存的user_id（如果没有指定，数据库会返回实际的user_id）
             actual_user_id = user_id
             if actual_user_id is None:
@@ -240,6 +248,15 @@ class CookieManager:
                 if cookie_info:
                     original_user_id = cookie_info.get('user_id')
 
+                if _external_connector_enabled():
+                    self.cookies[cookie_id] = new_value
+                    if save_to_db:
+                        db_manager.save_cookie(cookie_id, new_value, original_user_id)
+                    _save_connector_secret(cookie_id, new_value)
+                    _enqueue_connector_command(cookie_id, "reconnect")
+                    logger.info(f"已更新Cookie并通知独立连接器重连: {cookie_id}")
+                    return
+
                 # 保存原有的关键词和状态
                 if cookie_id in self.keywords:
                     original_keywords = self.keywords[cookie_id].copy()
@@ -319,6 +336,9 @@ class CookieManager:
 
         # 如果状态发生变化，需要启动或停止任务
         if old_status != enabled:
+            if _external_connector_enabled():
+                _enqueue_connector_command(cookie_id, "start" if enabled else "stop")
+                return
             if enabled:
                 # 启用账号：启动任务
                 self._start_cookie_task(cookie_id)
@@ -341,6 +361,9 @@ class CookieManager:
 
     def _start_cookie_task(self, cookie_id: str):
         """启动指定Cookie的任务"""
+        if _external_connector_enabled():
+            _enqueue_connector_command(cookie_id, "start")
+            return
         if cookie_id in self.tasks:
             existing_task = self.tasks.get(cookie_id)
             if existing_task is not None and not existing_task.done():
@@ -380,6 +403,9 @@ class CookieManager:
 
     def _stop_cookie_task(self, cookie_id: str):
         """停止指定Cookie的任务"""
+        if _external_connector_enabled():
+            _enqueue_connector_command(cookie_id, "stop")
+            return
         if cookie_id not in self.tasks:
             logger.warning(f"Cookie任务不存在，跳过停止: {cookie_id}")
             return
@@ -440,4 +466,37 @@ class CookieManager:
 
 
 # 在 Start.py 中会把此变量赋值为具体实例
-manager: Optional[CookieManager] = None 
+manager: Optional[CookieManager] = None
+
+
+def _external_connector_enabled() -> bool:
+    return os.getenv("XIANYU_EXTERNAL_CONNECTOR", "false").lower() == "true"
+
+
+def _enqueue_connector_command(cookie_id: str, command: str) -> None:
+    from pathlib import Path
+
+    from xianyu_connector.domain.commands import AccountCommand
+    from xianyu_connector.infrastructure.sqlite_command_repository import SqliteCommandRepository
+
+    repository = SqliteCommandRepository(Path(db_manager.db_path))
+    repository.enqueue(
+        cookie_id,
+        AccountCommand(command),
+        f"control:{command}:{cookie_id}:{time.time_ns()}",
+        {},
+    )
+
+
+def _save_connector_secret(cookie_id: str, cookie_value: str) -> None:
+    from pathlib import Path
+
+    from xianyu_connector.infrastructure.sqlite_secret_repository import SqliteSecretRepository
+    from xianyu_connector.security.aes_gcm import SecretCipher, load_master_key
+
+    key_path = Path(os.getenv("XIANYU_MASTER_KEY_PATH", "/run/secrets/xianyu_master_key"))
+    repository = SqliteSecretRepository(
+        Path(db_manager.db_path),
+        SecretCipher(load_master_key(key_path)),
+    )
+    repository.save(cookie_id, "cookie", cookie_value)

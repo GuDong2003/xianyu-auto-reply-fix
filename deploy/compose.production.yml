@@ -1,0 +1,209 @@
+name: xianyu-production
+
+x-runtime: &runtime
+  image: ${XIANYU_IMAGE:?XIANYU_IMAGE must include an immutable @sha256 digest}
+  restart: unless-stopped
+  init: true
+  user: "10001:10001"
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=128m
+  environment: &common-environment
+    XIANYU_PRODUCTION: "true"
+    XIANYU_EXTERNAL_CONNECTOR: "true"
+    XIANYU_RELEASE_ID: ${XIANYU_RELEASE_ID:?release script must set XIANYU_RELEASE_ID}
+    XIANYU_ASSET_REVISION: ${XIANYU_ASSET_REVISION:?release script must set XIANYU_ASSET_REVISION}
+    XIANYU_MASTER_KEY_PATH: /run/secrets/xianyu_master_key
+    DB_PATH: /app/data/xianyu_data.db
+    PYTHONUNBUFFERED: "1"
+    PYTHONDONTWRITEBYTECODE: "1"
+    SQL_LOG_ENABLED: "false"
+    AUTO_REPLY_ENABLED: "false"
+    AUTO_DELIVERY_ENABLED: "false"
+    ENABLE_VNC: "false"
+    TZ: Asia/Shanghai
+  secrets: &common-secrets
+    - xianyu_master_key
+    - connector_internal_token
+    - legacy_secret_key
+  networks: [xianyu-internal]
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  xianyu-migrate:
+    <<: *runtime
+    restart: "no"
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    secrets: []
+    networks:
+      xianyu-internal:
+        ipv4_address: 172.31.203.7
+    environment:
+      <<: *common-environment
+      XIANYU_ROLE: migrate
+    volumes:
+      - ${XIANYU_DATA_DIR:?set XIANYU_DATA_DIR}:/app/data
+
+  xianyu-connector:
+    <<: *runtime
+    networks:
+      xianyu-internal:
+        ipv4_address: 172.31.203.2
+    dns:
+      - 10.203.0.2
+    dns_opt:
+      - timeout:2
+      - attempts:2
+    environment:
+      <<: *common-environment
+      XIANYU_ROLE: connector
+      CONNECTOR_HOST: 0.0.0.0
+      CONNECTOR_PORT: "8091"
+      XIANYU_SHADOW_MODE: ${XIANYU_SHADOW_MODE:-true}
+      XIANYU_REQUIRE_FIXED_EGRESS: "true"
+      XIANYU_EXPECTED_EGRESS_IP: ${XIANYU_EXPECTED_EGRESS_IP:?set the compliant fixed egress IP}
+      XIANYU_EGRESS_CHECK_URL: ${XIANYU_EGRESS_CHECK_URL:-https://ifconfig.me/ip}
+      XIANYU_VERIFICATION_HEADLESS: "true"
+      XIANYU_VERIFICATION_TTL_SECONDS: "600"
+      XIANYU_VERIFICATION_IDLE_SECONDS: "300"
+      XIANYU_VERIFICATION_FRAME_MAX_BYTES: "1500000"
+      XIANYU_LOCAL_VERIFICATION_HANDOFF_ENABLED: ${XIANYU_LOCAL_VERIFICATION_HANDOFF_ENABLED:-false}
+      XIANYU_REMOTE_VERIFICATION_ENABLED: ${XIANYU_REMOTE_VERIFICATION_ENABLED:-false}
+    volumes:
+      - ${XIANYU_DATA_DIR:?set XIANYU_DATA_DIR}:/app/data
+      - ${XIANYU_PROFILES_DIR:?set XIANYU_PROFILES_DIR}:/var/lib/xianyu/accounts
+      - ${XIANYU_TRAJECTORY_DIR:?set XIANYU_TRAJECTORY_DIR}:/app/trajectory_history
+      - ${XIANYU_CONFIG_FILE:?set XIANYU_CONFIG_FILE}:/app/global_config.yml:ro
+    expose: ["8091"]
+    depends_on:
+      xianyu-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/live', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    mem_limit: 1100m
+    cpus: 1.5
+    pids_limit: 256
+
+  xianyu-control:
+    <<: *runtime
+    networks:
+      xianyu-internal:
+        ipv4_address: 172.31.203.4
+    environment:
+      <<: *common-environment
+      XIANYU_ROLE: control
+      XIANYU_CONNECTOR_URL: http://xianyu-connector:8091
+      API_HOST: 0.0.0.0
+      API_PORT: "8090"
+      USER_REGISTRATION_ENABLED: "false"
+      XIANYU_LOCAL_VERIFICATION_HANDOFF_ENABLED: ${XIANYU_LOCAL_VERIFICATION_HANDOFF_ENABLED:-false}
+      XIANYU_LOCAL_VERIFICATION_PUBLIC_ORIGIN: ${XIANYU_LOCAL_VERIFICATION_PUBLIC_ORIGIN:-}
+      XIANYU_REMOTE_VERIFICATION_ENABLED: ${XIANYU_REMOTE_VERIFICATION_ENABLED:-false}
+      XIANYU_REMOTE_VERIFICATION_PUBLIC_ORIGIN: ${XIANYU_REMOTE_VERIFICATION_PUBLIC_ORIGIN:-}
+    secrets:
+      - xianyu_master_key
+      - connector_internal_token
+      - legacy_secret_key
+      - admin_password
+      - jwt_secret
+    volumes:
+      - ${XIANYU_DATA_DIR:?set XIANYU_DATA_DIR}:/app/data
+      - ${XIANYU_LOGS_DIR:?set XIANYU_LOGS_DIR}:/app/logs
+      - ${XIANYU_BACKUPS_DIR:?set XIANYU_BACKUPS_DIR}:/app/backups
+      - ${XIANYU_UPLOADS_DIR:?set XIANYU_UPLOADS_DIR}:/app/static/uploads
+      - ${XIANYU_TRAJECTORY_DIR:?set XIANYU_TRAJECTORY_DIR}:/app/trajectory_history
+      - ${XIANYU_CONFIG_FILE:?set XIANYU_CONFIG_FILE}:/app/global_config.yml:ro
+    ports:
+      - "127.0.0.1:${XIANYU_CONTROL_PORT:-9000}:8090"
+    depends_on:
+      xianyu-migrate:
+        condition: service_completed_successfully
+      xianyu-connector:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/live', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    mem_limit: 900m
+    cpus: 1.0
+    pids_limit: 192
+
+  xianyu-backup:
+    <<: *runtime
+    restart: "no"
+    profiles: ["ops"]
+    entrypoint: ["python", "-m", "xianyu_connector.ops"]
+    command: ["backup"]
+    secrets: []
+    networks:
+      xianyu-internal:
+        ipv4_address: 172.31.203.5
+    environment:
+      <<: *common-environment
+      XIANYU_ROLE: backup
+      XIANYU_BACKUP_DIR: /app/backups
+    volumes:
+      - ${XIANYU_DATA_DIR:?set XIANYU_DATA_DIR}:/app/data
+      - ${XIANYU_BACKUPS_DIR:?set XIANYU_BACKUPS_DIR}:/app/backups
+
+  xianyu-restore-check:
+    <<: *runtime
+    restart: "no"
+    profiles: ["ops"]
+    entrypoint: ["python", "-m", "xianyu_connector.ops"]
+    command: ["restore-check"]
+    secrets: []
+    networks:
+      xianyu-internal:
+        ipv4_address: 172.31.203.6
+    environment:
+      <<: *common-environment
+      XIANYU_ROLE: restore-check
+      XIANYU_BACKUP_DIR: /app/backups
+    volumes:
+      - ${XIANYU_DATA_DIR:?set XIANYU_DATA_DIR}:/app/data
+      - ${XIANYU_BACKUPS_DIR:?set XIANYU_BACKUPS_DIR}:/app/backups
+
+networks:
+  xianyu-internal:
+    driver: bridge
+    internal: false
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.driver.mtu: "1380"
+    ipam:
+      config:
+        - subnet: 172.31.203.0/28
+
+secrets:
+  xianyu_master_key:
+    file: ${XIANYU_MASTER_KEY_FILE:?set XIANYU_MASTER_KEY_FILE}
+  connector_internal_token:
+    file: ${XIANYU_CONNECTOR_TOKEN_FILE:?set XIANYU_CONNECTOR_TOKEN_FILE}
+  legacy_secret_key:
+    file: ${XIANYU_LEGACY_SECRET_FILE:?set XIANYU_LEGACY_SECRET_FILE}
+  admin_password:
+    file: ${XIANYU_ADMIN_PASSWORD_FILE:?set XIANYU_ADMIN_PASSWORD_FILE}
+  jwt_secret:
+    file: ${XIANYU_JWT_SECRET_FILE:?set XIANYU_JWT_SECRET_FILE}

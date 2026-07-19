@@ -235,6 +235,8 @@ def log_captcha_event(cookie_id: str, event_type: str, success: bool = None, det
         success: 是否成功 (None表示进行中)
         details: 详细信息
     """
+    if os.getenv("XIANYU_EXTERNAL_CONNECTOR", "").lower() == "true":
+        return
     try:
         log_dir = 'logs'
         os.makedirs(log_dir, exist_ok=True)

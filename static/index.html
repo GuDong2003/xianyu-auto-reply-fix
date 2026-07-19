@@ -50,7 +50,7 @@
   <link rel="stylesheet" href="/static/lib/bootstrap/bootstrap.min.css">
   <link rel="stylesheet" href="/static/lib/bootstrap-icons/bootstrap-icons.css">
 
-  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/app.css?v=20260719-rfb1">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
@@ -471,24 +471,24 @@
         <!-- 添加Cookie卡片 -->
         <div class="card mb-4">
           <div class="card-header">
-            <span><i class="bi bi-plus-circle me-2"></i>添加新账号</span>
+            <span><i class="bi bi-person-gear me-2"></i>新增账号或恢复登录</span>
           </div>
           <div class="card-body">
             <!-- 添加方式选择 -->
             <div class="row mb-4">
               <div class="col-12">
                 <div class="d-grid gap-2 d-md-flex justify-content-md-center">
-                  <button type="button" class="btn btn-lg me-md-2 flex-fill qr-login-btn" onclick="showQRCodeLogin()" style="max-width: 300px;">
+                  <button type="button" class="btn btn-lg me-md-2 flex-fill qr-login-btn" data-requires-legacy-connection="true" onclick="showQRCodeLogin()" style="max-width: 300px;" hidden disabled>
                     <i class="bi bi-qr-code me-2"></i>
                     <span class="fw-bold">扫码登录</span>
                     <br>
-                    <small class="opacity-75">适合直接添加新账号</small>
+                    <small class="opacity-75">新增账号或恢复掉线账号</small>
                   </button>
-                  <button type="button" class="btn btn-outline-info btn-lg me-md-2 flex-fill qr-login-lite-btn" onclick="showQRCodeLogin('lite')" style="max-width: 300px;">
+                  <button type="button" class="btn btn-outline-info btn-lg me-md-2 flex-fill qr-login-lite-btn" data-requires-legacy-connection="true" onclick="showQRCodeLogin('lite')" style="max-width: 300px;" hidden disabled>
                     <i class="bi bi-qr-code-scan me-2"></i>
                     <span class="fw-bold">轻量扫码</span>
                     <br>
-                    <small class="opacity-75">纯 HTTP，无浏览器，秒级出码</small>
+                    <small class="opacity-75">推荐用于快速重新扫码</small>
                   </button>
                   <button type="button" class="btn btn-outline-primary btn-lg flex-fill password-login-btn" onclick="togglePasswordLogin()" style="max-width: 300px;">
                     <i class="bi bi-key me-2"></i>
@@ -509,11 +509,14 @@
                     <small class="opacity-75">手动导入消息页 Cookie</small>
                   </button>
                 </div>
+                <p id="connectorQrModeHint" class="text-muted text-center mt-3 mb-0" hidden>
+                  独立连接器模式请在已有账号行使用“重登”；当前不支持无目标账号扫码新增。
+                </p>
               </div>
             </div>
 
             <div class="text-center text-muted small mb-4">
-              建议优先使用扫码登录或账密登录添加账号，并尽快配置账密。未配置账密时，账号掉线后部分风控与恢复场景可能无法继续处理；如遇掉线，可优先尝试扫码登录或手动刷新 Cookie。
+              扫描同一个闲鱼账号会更新原账号 Cookie，不会重复创建。账号掉线或 Session 过期时，可直接使用账号行里的“重登”按钮。
             </div>
 
             <!-- 账号密码登录表单（默认隐藏） -->
@@ -4108,6 +4111,8 @@
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body text-center py-4">
+          <div id="qrLoginTargetHint" class="alert alert-info py-2 mb-4" style="display: none;"></div>
+
           <!-- 步骤指引 -->
           <div class="row mb-4">
             <div class="col-12">
@@ -4124,7 +4129,7 @@
                 <i class="bi bi-arrow-right text-muted me-3"></i>
                 <div class="step-item">
                   <div class="step-number bg-success text-white rounded-circle d-inline-flex align-items-center justify-content-center" style="width: 30px; height: 30px;">3</div>
-                  <small class="d-block mt-1">自动添加账号</small>
+                  <small class="d-block mt-1">自动添加或更新</small>
                 </div>
               </div>
             </div>
@@ -5093,7 +5098,8 @@
 
   <!-- JS依赖 -->
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
-  <script src="/static/js/app.js?v=1.2.9"></script>
+  <script src="/static/js/remote-verification-console.js?v=20260719-rfb2"></script>
+  <script src="/static/js/app.js?v=20260719-qr4"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">
@@ -5810,36 +5816,6 @@
           <button type="button" class="btn btn-primary" onclick="saveAccountEdit()">
             <i class="bi bi-check-lg me-1"></i>保存
           </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 滑块验证模态框 -->
-  <div class="modal fade" id="captchaVerifyModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
-    <div class="modal-dialog modal-xl modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header bg-warning">
-          <h5 class="modal-title">
-            <i class="bi bi-shield-exclamation me-2"></i>
-            需要滑块验证
-          </h5>
-        </div>
-        <div class="modal-body p-0">
-          <div class="alert alert-info m-3 mb-0">
-            <i class="bi bi-info-circle me-2"></i>
-            <strong>提示：</strong>检测到滑块验证，请完成滑块验证后继续搜索。验证成功后将自动关闭此窗口。
-          </div>
-          <iframe id="captchaIframe" 
-                  style="width: 100%; height: 600px; border: none;"
-                  sandbox="allow-same-origin allow-scripts allow-forms">
-          </iframe>
-          <div id="captchaLoadingIndicator" class="text-center py-5">
-            <div class="spinner-border text-primary mb-3" role="status">
-              <span class="visually-hidden">加载中...</span>
-            </div>
-            <p class="text-muted">正在加载滑块验证...</p>
-          </div>
         </div>
       </div>
     </div>

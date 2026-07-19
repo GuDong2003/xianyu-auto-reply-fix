@@ -9,5 +9,17 @@
 @import url('components.css');
 @import url('about.css');
 @import url('admin.css');
+@import url('remote-verification-console.css?v=20260719-rfb1');
 
+/* Critical connector action stays readable even when imported account CSS is cached. */
+.account-action-btn.account-action-qr-relogin {
+  width: auto;
+  min-width: 62px;
+  gap: 0.3rem;
+  padding: 0 0.5rem;
+  font-weight: 600;
+}
 
+.account-action-btn.account-action-qr-relogin .action-text {
+  display: inline;
+}

@@ -61,7 +61,7 @@ def _print_qr_terminal(qr_url: str) -> None:
     try:
         import qrcode as qr_lib
     except ImportError:
-        logger.warning(f"qrcode 包未安装，跳过终端渲染；请手动扫码: {qr_url}")
+        logger.warning("qrcode 包未安装，跳过终端渲染")
         return
     qr = qr_lib.QRCode(border=1, box_size=1)
     qr.add_data(qr_url)
@@ -198,7 +198,7 @@ def qrcode_login_lite(
     if not (qr_url and qr_t and qr_ck):
         raise RuntimeError(f"生成二维码失败: {gen_resp}")
 
-    logger.info(f"获取到登录二维码: {qr_url}")
+    logger.info("登录二维码已生成")
     if on_qr_url is not None:
         try:
             on_qr_url(qr_url)

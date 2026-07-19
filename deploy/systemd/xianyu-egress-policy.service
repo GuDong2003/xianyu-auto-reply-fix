@@ -1,0 +1,13 @@
+[Unit]
+Description=Xianyu connector Hangzhou egress policy
+After=network-online.target docker.service wg-quick@wg-hz.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xianyu-egress-policy apply
+ExecReload=/usr/local/sbin/xianyu-egress-policy apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -5,7 +5,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Tuple, Optional, Dict, Any, Callable, Awaitable
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from urllib import request as urllib_request, error as urllib_error
 import hashlib
 import secrets
@@ -55,6 +55,104 @@ from chat_event_hub import chat_event_hub, publish_chat_message
 from order_event_hub import order_event_hub, publish_order_update_event
 
 from loguru import logger
+
+
+def _release_token(value: Any, fallback: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+    token = token.strip(".-_")
+    return token[:128] or fallback
+
+
+RELEASE_ID = _release_token(os.getenv("XIANYU_RELEASE_ID"), "development")
+ASSET_REVISION = _release_token(
+    os.getenv("XIANYU_ASSET_REVISION") or RELEASE_ID,
+    RELEASE_ID,
+)
+RELEASE_ASSET_PREFIX = f"/static/releases/{ASSET_REVISION}"
+
+
+def validate_remote_verification_configuration(
+    *, enabled: bool, public_origin: str
+) -> None:
+    """Reject remote verification without the HTTPS boundary required by Secure cookies."""
+    if not enabled:
+        return
+    parsed = urlsplit(str(public_origin or "").strip())
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(
+            "remote verification requires an HTTPS public origin on port 443"
+        ) from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+    ):
+        raise RuntimeError(
+            "remote verification requires an HTTPS public origin on port 443 because its cookies are Secure"
+        )
+
+
+def _render_release_html(content: str) -> str:
+    rendered = re.sub(
+        r"([\"'])/static/(?!releases/)",
+        rf"\1{RELEASE_ASSET_PREFIX}/",
+        str(content),
+    )
+    rendered = re.sub(
+        rf"({re.escape(RELEASE_ASSET_PREFIX)}/[^\"'\s>]+)\?v=[^\"'\s>]+",
+        r"\1",
+        rendered,
+    )
+    release_meta = (
+        f'<meta name="x-xianyu-release-id" content="{RELEASE_ID}">'
+        f'<meta name="x-xianyu-asset-revision" content="{ASSET_REVISION}">'
+    )
+    if "x-xianyu-release-id" not in rendered and "<head" in rendered:
+        rendered = re.sub(
+            r"(<head\b[^>]*>)",
+            rf"\1{release_meta}",
+            rendered,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return rendered
+
+
+def _mark_release_response(
+    response: Response,
+    *,
+    no_store: bool = False,
+    immutable: bool = False,
+) -> Response:
+    response.headers["X-Xianyu-Release-Id"] = RELEASE_ID
+    response.headers["X-Xianyu-Asset-Revision"] = ASSET_REVISION
+    if no_store:
+        response.headers["Cache-Control"] = "no-store, private, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    elif immutable:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
+def _html_response(content: str, *, status_code: int = 200) -> HTMLResponse:
+    return _mark_release_response(
+        HTMLResponse(_render_release_html(content), status_code=status_code),
+        no_store=True,
+    )
+
+
+validate_remote_verification_configuration(
+    enabled=os.getenv("XIANYU_REMOTE_VERIFICATION_ENABLED", "false").lower() == "true",
+    public_origin=os.getenv("XIANYU_REMOTE_VERIFICATION_PUBLIC_ORIGIN", ""),
+)
 
 # 刮刮乐远程控制路由
 try:
@@ -1186,6 +1284,53 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+if os.getenv("XIANYU_EXTERNAL_CONNECTOR", "false").lower() == "true":
+    from xianyu_control import accounts_router as accounts_router_module
+    from xianyu_control.connector_client import ConnectorClient
+
+    accounts_router_module.REMOTE_VIEWER_HTML = _render_release_html(
+        accounts_router_module.REMOTE_VIEWER_HTML
+    )
+    create_accounts_router = accounts_router_module.create_accounts_router
+    remote_verification_enabled = (
+        os.getenv("XIANYU_REMOTE_VERIFICATION_ENABLED", "false").lower() == "true"
+    )
+    remote_verification_public_origin = os.getenv(
+        "XIANYU_REMOTE_VERIFICATION_PUBLIC_ORIGIN", ""
+    )
+    connector_client = ConnectorClient(
+        os.getenv("XIANYU_CONNECTOR_URL", "http://xianyu-connector:8091"),
+        os.getenv("XIANYU_CONNECTOR_INTERNAL_TOKEN", ""),
+    )
+    app.include_router(
+        create_accounts_router(
+            Path(db_manager.db_path),
+            get_current_user,
+            connector_client.create_qr_session,
+            connector_client.get_qr_session,
+            create_verification=connector_client.create_verification_session,
+            get_verification=connector_client.get_verification_session,
+            get_verification_frame=connector_client.get_verification_frame,
+            send_verification_input=connector_client.send_verification_input,
+            complete_verification=connector_client.complete_verification_session,
+            cancel_verification=connector_client.cancel_verification_session,
+            create_local_verification=connector_client.create_local_verification_session,
+            get_local_verification_handoff=connector_client.get_local_verification_handoff,
+            complete_local_verification=connector_client.complete_local_verification_session,
+            connect_remote_verification=connector_client.connect_remote_verification,
+            remote_verification_enabled=remote_verification_enabled,
+            remote_verification_public_origin=remote_verification_public_origin,
+            remote_verification_proof_secret=os.getenv("XIANYU_CONNECTOR_INTERNAL_TOKEN", ""),
+        )
+    )
+
+
+def _require_legacy_connection_mode() -> None:
+    if os.getenv("XIANYU_EXTERNAL_CONNECTOR", "false").lower() == "true":
+        raise HTTPException(
+            status_code=409,
+            detail="独立连接器模式下禁止使用旧认证与保活入口",
+        )
 # 注册刮刮乐远程控制路由
 if CAPTCHA_ROUTER_AVAILABLE:
     app.include_router(captcha_router)
@@ -1245,6 +1390,15 @@ async def log_requests(request, call_next):
 
     response = await call_next(request)
 
+    _mark_release_response(response)
+    request_path = request.url.path
+    if response.status_code == 401:
+        _mark_release_response(response, no_store=True)
+    elif request_path.startswith(f"{RELEASE_ASSET_PREFIX}/"):
+        _mark_release_response(response, immutable=True)
+    elif request_path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+
     process_time = time.time() - start_time
     logger.info(f"✅ {user_info} API响应: {request.method} {request.url.path} - {response.status_code} ({process_time:.3f}s)")
 
@@ -1256,6 +1410,46 @@ static_dir = os.path.join(os.path.dirname(__file__), 'static')
 if not os.path.exists(static_dir):
     os.makedirs(static_dir, exist_ok=True)
 
+
+@app.get('/api/release', include_in_schema=False)
+async def release_metadata():
+    return _mark_release_response(
+        JSONResponse(
+            {
+                "release_id": RELEASE_ID,
+                "asset_revision": ASSET_REVISION,
+            }
+        ),
+        no_store=True,
+    )
+
+
+@app.get(
+    f"{RELEASE_ASSET_PREFIX}/js/remote-verification-viewer.js",
+    include_in_schema=False,
+)
+async def release_remote_verification_viewer_script():
+    viewer_path = Path(static_dir) / "js" / "remote-verification-viewer.js"
+    if not viewer_path.is_file():
+        raise HTTPException(status_code=404, detail="remote verification viewer not found")
+    source = viewer_path.read_text(encoding="utf-8")
+    source = re.sub(
+        r"from\s+(['\"])/static/vendor/novnc/core/rfb\.js(?:\?v=[^'\"]+)?\1",
+        f"from '{RELEASE_ASSET_PREFIX}/vendor/novnc/core/rfb.js'",
+        source,
+        count=1,
+    )
+    return _mark_release_response(
+        Response(source, media_type="text/javascript; charset=utf-8"),
+        immutable=True,
+    )
+
+
+app.mount(
+    RELEASE_ASSET_PREFIX,
+    StaticFiles(directory=static_dir),
+    name='release-static',
+)
 app.mount('/static', StaticFiles(directory=static_dir), name='static')
 
 # 确保图片上传目录存在
@@ -1320,9 +1514,9 @@ async def root():
     login_path = os.path.join(static_dir, 'login.html')
     if os.path.exists(login_path):
         with open(login_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
+            return _html_response(f.read())
     else:
-        return HTMLResponse('<h3>Login page not found</h3>')
+        return _html_response('<html><head></head><body><h3>Login page not found</h3></body></html>')
 
 
 # ========================= 验证码API =========================
@@ -1391,9 +1585,9 @@ async def login_page():
     login_path = os.path.join(static_dir, 'login.html')
     if os.path.exists(login_path):
         with open(login_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
+            return _html_response(f.read())
     else:
-        return HTMLResponse('<h3>Login page not found</h3>')
+        return _html_response('<html><head></head><body><h3>Login page not found</h3></body></html>')
 
 
 # 注册页面路由
@@ -1403,7 +1597,7 @@ async def register_page():
     from db_manager import db_manager
     registration_enabled = db_manager.get_system_setting('registration_enabled')
     if registration_enabled != 'true':
-        return HTMLResponse('''
+        return _html_response('''
         <!DOCTYPE html>
         <html>
         <head>
@@ -1429,9 +1623,9 @@ async def register_page():
     register_path = os.path.join(static_dir, 'register.html')
     if os.path.exists(register_path):
         with open(register_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
+            return _html_response(f.read())
     else:
-        return HTMLResponse('<h3>Register page not found</h3>')
+        return _html_response('<html><head></head><body><h3>Register page not found</h3></body></html>')
 
 
 # 管理页面（不需要服务器端认证，由前端JavaScript处理）
@@ -1439,7 +1633,7 @@ async def register_page():
 async def admin_page():
     index_path = os.path.join(static_dir, 'index.html')
     if not os.path.exists(index_path):
-        return HTMLResponse('<h3>No front-end found</h3>')
+        return _html_response('<html><head></head><body><h3>No front-end found</h3></body></html>')
     
     # 获取静态文件的修改时间作为版本号，解决浏览器缓存问题
     def get_file_version(file_path, default='1.0.0'):
@@ -1474,10 +1668,10 @@ async def admin_page():
             css_new_url = f'/static/css/app.css?v={css_version}'
             html_content = re.sub(css_pattern, css_new_url, html_content)
             
-            return HTMLResponse(html_content)
+            return _html_response(html_content)
     except Exception as e:
         logger.error(f"读取或处理 index.html 失败: {e}")
-        return HTMLResponse('<h3>Error loading page</h3>')
+        return _html_response('<html><head></head><body><h3>Error loading page</h3></body></html>')
 
 
 
@@ -1729,15 +1923,25 @@ async def login(login_request: LoginRequest, request: Request):
 
 # 验证token接口
 @app.get('/verify')
-async def verify(user_info: Optional[Dict[str, Any]] = Depends(verify_token)):
+async def verify(
+    response: Response,
+    user_info: Optional[Dict[str, Any]] = Depends(verify_token),
+):
+    _mark_release_response(response, no_store=True)
+    connection_mode = (
+        "external_connector"
+        if os.getenv("XIANYU_EXTERNAL_CONNECTOR", "false").lower() == "true"
+        else "legacy"
+    )
     if user_info:
         return {
             "authenticated": True,
             "user_id": user_info['user_id'],
             "username": user_info['username'],
-            "is_admin": user_info.get('is_admin', False) or user_info['username'] == ADMIN_USERNAME
+            "is_admin": user_info.get('is_admin', False) or user_info['username'] == ADMIN_USERNAME,
+            "connection_mode": connection_mode,
         }
-    return {"authenticated": False}
+    return {"authenticated": False, "connection_mode": connection_mode}
 
 
 # 登出接口
@@ -4070,6 +4274,10 @@ def _is_runtime_timestamp_recent(value: Any, window_seconds: Any) -> bool:
 
 def _build_live_runtime_status(cookie_id: str) -> Dict[str, Any]:
     cleaned_cid = str(cookie_id or '').strip()
+    if os.getenv("XIANYU_EXTERNAL_CONNECTOR", "false").lower() == "true":
+        from xianyu_control.runtime_compat import build_legacy_runtime_status
+
+        return build_legacy_runtime_status(Path(db_manager.db_path), cleaned_cid)
     runtime_status = {
         'instance_exists': False,
         'running': False,
@@ -4762,6 +4970,7 @@ async def get_conversation_history(
 async def trigger_session_keepalive(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """手动触发一次轻量会话保活。"""
     try:
+        _require_legacy_connection_mode()
         cid = _ensure_cookie_access(cid, current_user)
 
         from XianyuAutoAsync import XianyuLive
@@ -6151,6 +6360,7 @@ async def manual_cookie_import(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """手动导入 Cookie，并按单次调试链路执行真实浏览器滑块验证。"""
+    _require_legacy_connection_mode()
     try:
         account_id = str(request.account_id or '').strip()
         cookie_value = str(request.cookie or '').replace('\ufeff', '').strip()
@@ -6271,6 +6481,7 @@ async def password_login(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """账号密码登录接口（异步，支持人脸认证）"""
+    _require_legacy_connection_mode()
     try:
         account_id = request.get('account_id')
         account = request.get('account')
@@ -6707,6 +6918,7 @@ async def delete_account_face_verification_screenshot(
 @app.post("/qr-login/generate")
 async def generate_qr_code(current_user: Dict[str, Any] = Depends(get_current_user)):
     """生成扫码登录二维码"""
+    _require_legacy_connection_mode()
     try:
         log_with_user('info', "请求生成扫码登录二维码", current_user)
 
@@ -6727,6 +6939,7 @@ async def generate_qr_code(current_user: Dict[str, Any] = Depends(get_current_us
 @app.get("/qr-login/check/{session_id}")
 async def check_qr_code_status(session_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """检查扫码登录状态"""
+    _require_legacy_connection_mode()
     try:
         # 清理过期记录
         cleanup_qr_check_records()
@@ -6929,6 +7142,7 @@ async def _run_qr_login_lite(session_id: str, current_user: Dict[str, Any]):
 @app.post("/qr-login-lite/generate")
 async def generate_qr_code_lite(current_user: Dict[str, Any] = Depends(get_current_user)):
     """生成轻量扫码登录(纯 HTTP)二维码"""
+    _require_legacy_connection_mode()
     try:
         log_with_user('info', "请求生成轻量扫码登录二维码", current_user)
         _cleanup_qr_lite_sessions()
@@ -6974,6 +7188,7 @@ async def generate_qr_code_lite(current_user: Dict[str, Any] = Depends(get_curre
 @app.get("/qr-login-lite/check/{session_id}")
 async def check_qr_code_status_lite(session_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """检查轻量扫码登录状态"""
+    _require_legacy_connection_mode()
     try:
         st = qr_lite_sessions.get(session_id)
         if not st:
@@ -7301,6 +7516,7 @@ async def refresh_cookies_from_qr_login(
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """使用扫码登录获取的cookie访问指定界面获取真实cookie并存入数据库"""
+    _require_legacy_connection_mode()
     try:
         qr_cookies = request.get('qr_cookies')
         cookie_id = request.get('cookie_id')

@@ -10,6 +10,37 @@ if [ "$#" -gt 0 ] && [ -n "${XIANYU_POINTER_E2E_CHROMIUM:-}" ]; then
         echo "E2E Chromium host resolver rules are missing" >&2
         exit 2
     fi
+    if [ -z "${XIANYU_POINTER_E2E_BROWSER_STATE:-}" ]; then
+        echo "E2E Chromium browser state root is missing" >&2
+        exit 2
+    fi
+    browser_home="$XIANYU_POINTER_E2E_BROWSER_STATE/home"
+    browser_config="$XIANYU_POINTER_E2E_BROWSER_STATE/config"
+    browser_cache="$XIANYU_POINTER_E2E_BROWSER_STATE/cache"
+    browser_data="$XIANYU_POINTER_E2E_BROWSER_STATE/data"
+    browser_runtime="$XIANYU_POINTER_E2E_BROWSER_STATE/runtime"
+    browser_crash="$XIANYU_POINTER_E2E_BROWSER_STATE/crash"
+    umask 077
+    mkdir -p \
+        "$browser_home" \
+        "$browser_config" \
+        "$browser_cache" \
+        "$browser_data" \
+        "$browser_runtime" \
+        "$browser_crash"
+    chmod 700 \
+        "$browser_home" \
+        "$browser_config" \
+        "$browser_cache" \
+        "$browser_data" \
+        "$browser_runtime" \
+        "$browser_crash"
+    export HOME="$browser_home"
+    export XDG_CONFIG_HOME="$browser_config"
+    export XDG_CACHE_HOME="$browser_cache"
+    export XDG_DATA_HOME="$browser_data"
+    export XDG_RUNTIME_DIR="$browser_runtime"
+    export BREAKPAD_DUMP_LOCATION="$browser_crash"
     exec "$XIANYU_POINTER_E2E_CHROMIUM" \
         --ignore-certificate-errors \
         --allow-insecure-localhost \

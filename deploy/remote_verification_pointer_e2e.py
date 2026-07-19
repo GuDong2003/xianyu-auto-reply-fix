@@ -49,6 +49,7 @@ CONTROL_HOST = "control.test"
 CHALLENGE_HOST = "challenge.goofish.com"
 SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 900
+MIN_HORIZONTAL_DRAG_DELTA = 100
 RUNNER_PATH = PROJECT_ROOT / "deploy" / "run-remote-verification-pointer-e2e.sh"
 
 _CHALLENGE_HTML = """<!doctype html>
@@ -393,6 +394,14 @@ def _assert_pointer_drag(events: list[dict[str, Any]]) -> None:
     )
     if not down_index < move_index < up_index:
         raise AssertionError(f"invalid pointer sequence: {events!r}")
+    pressed_events = [events[down_index], *(events[index] for index in move_indexes)]
+    horizontal_positions = [float(event["x"]) for event in pressed_events]
+    horizontal_delta = max(horizontal_positions) - min(horizontal_positions)
+    if horizontal_delta < MIN_HORIZONTAL_DRAG_DELTA:
+        raise AssertionError(
+            "pointer drag requires significant horizontal delta "
+            f"({horizontal_delta:.1f} < {MIN_HORIZONTAL_DRAG_DELTA}): {events!r}"
+        )
 
 
 def _create_challenge_app(probe: _PointerProbe) -> FastAPI:
@@ -524,6 +533,7 @@ def _write_certificate(root: Path) -> tuple[Path, Path]:
 def _browser_wrapper_environment(
     chromium: Path,
     *,
+    browser_state_root: Path,
     control_port: int,
     challenge_port: int,
 ) -> dict[str, str]:
@@ -534,6 +544,7 @@ def _browser_wrapper_environment(
     return {
         "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH": str(RUNNER_PATH),
         "XIANYU_POINTER_E2E_CHROMIUM": str(chromium),
+        "XIANYU_POINTER_E2E_BROWSER_STATE": str(browser_state_root),
         "XIANYU_POINTER_E2E_HOST_RESOLVER_RULES": resolver_rules,
     }
 
@@ -705,6 +716,7 @@ def main() -> int:
         certificate_path, key_path = _write_certificate(root)
         browser_environment = _browser_wrapper_environment(
             chromium,
+            browser_state_root=root / "browser-state",
             control_port=control_port,
             challenge_port=challenge_port,
         )

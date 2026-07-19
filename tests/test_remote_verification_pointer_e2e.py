@@ -12,13 +12,34 @@ from deploy import remote_verification_pointer_e2e as pointer_e2e
 PROJECT_ROOT = Path(__file__).parents[1]
 
 
-def test_runner_dispatches_chromium_without_executing_from_tmp(tmp_path: Path) -> None:
+def test_browser_wrapper_environment_uses_ephemeral_state_root(tmp_path: Path) -> None:
+    browser_state = tmp_path / "browser-state"
+
+    environment = pointer_e2e._browser_wrapper_environment(
+        Path("/ms-playwright/chromium/chrome"),
+        browser_state_root=browser_state,
+        control_port=9443,
+        challenge_port=9444,
+    )
+
+    assert environment["XIANYU_POINTER_E2E_BROWSER_STATE"] == str(browser_state)
+
+
+def test_runner_dispatches_chromium_with_writable_runtime_state(tmp_path: Path) -> None:
     chromium = tmp_path / "chromium"
     chromium.write_text(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+        "#!/bin/sh\n"
+        "printf 'HOME=%s\\n' \"$HOME\"\n"
+        "printf 'XDG_CONFIG_HOME=%s\\n' \"$XDG_CONFIG_HOME\"\n"
+        "printf 'XDG_CACHE_HOME=%s\\n' \"$XDG_CACHE_HOME\"\n"
+        "printf 'XDG_DATA_HOME=%s\\n' \"$XDG_DATA_HOME\"\n"
+        "printf 'XDG_RUNTIME_DIR=%s\\n' \"$XDG_RUNTIME_DIR\"\n"
+        "printf 'BREAKPAD_DUMP_LOCATION=%s\\n' \"$BREAKPAD_DUMP_LOCATION\"\n"
+        "printf '%s\\n' \"$@\"\n",
         encoding="utf-8",
     )
     chromium.chmod(0o700)
+    browser_state = tmp_path / "browser-state"
 
     result = subprocess.run(
         [
@@ -31,6 +52,7 @@ def test_runner_dispatches_chromium_without_executing_from_tmp(tmp_path: Path) -
         env={
             **os.environ,
             "XIANYU_POINTER_E2E_CHROMIUM": str(chromium),
+            "XIANYU_POINTER_E2E_BROWSER_STATE": str(browser_state),
             "XIANYU_POINTER_E2E_HOST_RESOLVER_RULES": (
                 "MAP control.test:443 127.0.0.1:9443,"
                 "MAP challenge.goofish.com:443 127.0.0.1:9444"
@@ -40,11 +62,21 @@ def test_runner_dispatches_chromium_without_executing_from_tmp(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
+        f"HOME={browser_state / 'home'}",
+        f"XDG_CONFIG_HOME={browser_state / 'config'}",
+        f"XDG_CACHE_HOME={browser_state / 'cache'}",
+        f"XDG_DATA_HOME={browser_state / 'data'}",
+        f"XDG_RUNTIME_DIR={browser_state / 'runtime'}",
+        f"BREAKPAD_DUMP_LOCATION={browser_state / 'crash'}",
         "--ignore-certificate-errors",
         "--allow-insecure-localhost",
         "--host-resolver-rules=MAP control.test:443 127.0.0.1:9443,MAP challenge.goofish.com:443 127.0.0.1:9444",
         "--user-data-dir=/tmp/profile",
     ]
+    for directory in ("home", "config", "cache", "data", "runtime", "crash"):
+        path = browser_state / directory
+        assert path.is_dir()
+        assert path.stat().st_mode & 0o777 == 0o700
 
 
 def test_runtime_preflight_requires_noexec_tmpfs() -> None:
@@ -66,6 +98,18 @@ def test_pointer_drag_requires_multiple_pressed_moves() -> None:
     ]
 
     with pytest.raises(AssertionError, match="multiple pointermove"):
+        pointer_e2e._assert_pointer_drag(events)
+
+
+def test_pointer_drag_requires_significant_horizontal_delta() -> None:
+    events = [
+        {"type": "pointerdown", "x": 400, "y": 500, "buttons": 1},
+        {"type": "pointermove", "x": 400, "y": 500, "buttons": 1},
+        {"type": "pointermove", "x": 401, "y": 500, "buttons": 1},
+        {"type": "pointerup", "x": 401, "y": 500, "buttons": 0},
+    ]
+
+    with pytest.raises(AssertionError, match="horizontal delta"):
         pointer_e2e._assert_pointer_drag(events)
 
 

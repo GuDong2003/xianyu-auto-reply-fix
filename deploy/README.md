@@ -81,16 +81,13 @@ connector releases refuse to run while the legacy container is still active.
 
 For normal production promotion, install `promote-ghcr-release.sh`, `release.sh`, `rollback.sh`,
 `verify-production-release.sh`, both production deployment entrypoints, and `compose.production.yml`
-together in a root-owned deployment directory. The promotion wrapper
-expects root's Docker client to be authenticated to GHCR with a dedicated package-read credential;
-do not store that credential in `production.env`. The wrapper accepts only lowercase
+together in a root-owned deployment directory. The production package and its attached OCI
+attestation are public and are fetched anonymously; do not configure a GitHub PAT or root Docker
+registry credential for this deployment path. The wrapper accepts only lowercase
 `ghcr.io/...@sha256:<64 hex>` references, pulls and verifies the linux/amd64 image, atomically updates
 the root-owned environment file, and forces remote verification off before release:
 
 ```sh
-# Run once as root with a dedicated machine-account token scoped to read:packages.
-printf '%s' "$GHCR_READ_TOKEN" | docker login ghcr.io -u xianyu-deploy --password-stdin
-chmod 0600 /root/.docker/config.json
 install -d -o root -g root -m 0750 /opt/xianyu-production/staging
 install -o root -g root -m 0750 \
   deploy/promote-ghcr-release.sh deploy/release.sh deploy/rollback.sh \
@@ -103,16 +100,19 @@ install -o root -g root -m 0644 deploy/compose.production.yml \
   /opt/xianyu-production/staging/compose.production.yml
 ```
 
-Install GitHub CLI 2.96.0 or newer at the fixed `/usr/bin/gh` path. No additional GitHub PAT is used:
-the provenance verifier loads the OCI bundle with the existing root GHCR authentication in
-`/root/.docker/config.json`. The root orchestrator fails before Docker promotion if the CLI,
-registry authentication, OCI attestation, protected-main source ref, signer workflow, repository
-identity, or GitHub-hosted runner provenance cannot be verified. Its effective policy is:
+Install GitHub CLI 2.96.0 or newer at the fixed `/usr/bin/gh` path. No GitHub PAT or Docker registry
+credential is required. The provenance verifier supplies a fixed non-secret `GH_TOKEN` placeholder
+only to satisfy the CLI's login precondition, then loads the public attestation bundle directly from
+OCI. The root orchestrator fails before Docker promotion if the CLI, OCI attestation, exact workflow
+certificate identity, GitHub Actions OIDC issuer, protected-main source ref, repository identity, or
+GitHub-hosted runner provenance cannot be verified. Its effective policy is:
 
 ```sh
-gh attestation verify "oci://$XIANYU_IMAGE" \
-  --repo owner/repository \
-  --signer-workflow owner/repository/.github/workflows/docker-image.yml \
+GH_TOKEN=unused-for-oci-bundle gh attestation verify "oci://$XIANYU_IMAGE" \
+  --repo Owner/repository \
+  --cert-identity \
+    https://github.com/Owner/repository/.github/workflows/docker-image.yml@refs/heads/main \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
   --source-ref refs/heads/main \
   --deny-self-hosted-runners \
   --bundle-from-oci
@@ -137,8 +137,11 @@ xianyu-deploy ALL=(root) NOPASSWD: /opt/xianyu-production/staging/production-dep
 
 Do not configure `AcceptEnv` for deployment variables. Even if the host has unrelated global
 `AcceptEnv` settings, the forced parser ignores them and the root orchestrator clears its child
-environment. Set `XIANYU_GHCR_REPOSITORY=ghcr.io/owner/repository` in the root-owned production env;
-automation rejects every other repository before Docker is invoked.
+environment. Set both `XIANYU_GHCR_REPOSITORY=ghcr.io/owner/repository` and the case-preserving
+`XIANYU_GITHUB_REPOSITORY=Owner/repository` in the root-owned production env. Their repository paths
+must match case-insensitively; automation rejects a mismatch or every other GHCR repository before
+Docker is invoked. The case-preserving value is required because the certificate SAN comparison is
+exact and GitHub owner casing is significant there.
 
 Configure the GitHub `production` Environment with required reviewers and these secrets:
 `PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_PORT`, `PRODUCTION_SSH_USER`,

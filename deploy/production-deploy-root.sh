@@ -50,6 +50,22 @@ case "$image" in
     "$expected_repository"@sha256:*) ;;
     *) echo "image repository does not match XIANYU_GHCR_REPOSITORY" >&2; exit 2 ;;
 esac
+github_repository_count=$(grep -c '^XIANYU_GITHUB_REPOSITORY=' "$env_file" || true)
+if [ "$github_repository_count" -ne 1 ]; then
+    echo "production environment must define XIANYU_GITHUB_REPOSITORY exactly once" >&2
+    exit 2
+fi
+github_repository=$(sed -n 's/^XIANYU_GITHUB_REPOSITORY=//p' "$env_file")
+if ! printf '%s\n' "$github_repository" \
+    | grep -Eq '^[A-Za-z0-9]+(-[A-Za-z0-9]+)*/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$'; then
+    echo "production environment must fix XIANYU_GITHUB_REPOSITORY" >&2
+    exit 2
+fi
+github_repository_lower=$(printf '%s\n' "$github_repository" | tr '[:upper:]' '[:lower:]')
+if [ "$github_repository_lower" != "${expected_repository#ghcr.io/}" ]; then
+    echo "XIANYU_GITHUB_REPOSITORY does not correspond to XIANYU_GHCR_REPOSITORY" >&2
+    exit 2
+fi
 
 exec 9>/run/lock/xianyu-production-deploy.lock
 if ! /usr/bin/flock -n 9; then
@@ -157,7 +173,7 @@ retry_committed_recovery_once() {
     return 1
 }
 
-clean_run "$verify_provenance" "$image" "$expected_repository"
+clean_run "$verify_provenance" "$image" "$expected_repository" "$github_repository"
 
 if clean_run "$promote" "$image" "$release_target"; then
     :

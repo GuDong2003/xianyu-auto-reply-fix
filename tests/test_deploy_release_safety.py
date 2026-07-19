@@ -16,6 +16,9 @@ PREVIOUS_IMAGE_DIGEST = "sha256:" + "b" * 64
 PREVIOUS_GHCR_IMAGE = f"ghcr.io/example/xianyu-connector@{PREVIOUS_IMAGE_DIGEST}"
 FAILED_IMAGE_DIGEST = "sha256:" + "c" * 64
 FAILED_GHCR_IMAGE = f"ghcr.io/example/xianyu-connector@{FAILED_IMAGE_DIGEST}"
+PROVENANCE_GHCR_REPOSITORY = "ghcr.io/wangjunkai-1996/xianyu-auto-reply-fix"
+PROVENANCE_GITHUB_REPOSITORY = "Wangjunkai-1996/xianyu-auto-reply-fix"
+PROVENANCE_IMAGE = f"{PROVENANCE_GHCR_REPOSITORY}@{IMAGE_DIGEST}"
 
 
 def _write_executable(path: Path, source: str) -> Path:
@@ -100,17 +103,10 @@ def _provenance_verifier_with_fake_gh(tmp_path: Path) -> tuple[Path, Path, Path]
         f"printf 'GITHUB_TOKEN=%s\\n' \"${{GITHUB_TOKEN-unset}}\" >> "
         f"{shlex.quote(str(gh_environment_log))}\n",
     )
-    docker_config = tmp_path / "docker-config.json"
-    docker_config.write_text("{}\n", encoding="utf-8")
     verifier = _copy_deploy_script(
         "verify-github-provenance.sh",
         tmp_path,
-        {
-            "gh=/usr/bin/gh": f"gh={shlex.quote(str(fake_gh))}",
-            "docker_config=/root/.docker/config.json": (
-                f"docker_config={shlex.quote(str(docker_config))}"
-            ),
-        },
+        {"gh=/usr/bin/gh": f"gh={shlex.quote(str(fake_gh))}"},
     )
     return verifier, gh_log, gh_environment_log
 
@@ -656,8 +652,9 @@ def test_provenance_verifier_uses_oci_bundle_and_fixed_github_identity(
 
     result = _run(
         verifier,
-        GHCR_IMAGE,
-        "ghcr.io/example/xianyu-connector",
+        PROVENANCE_IMAGE,
+        PROVENANCE_GHCR_REPOSITORY,
+        PROVENANCE_GITHUB_REPOSITORY,
         env={
             **os.environ,
             "GH_TOKEN": "must-not-be-forwarded",
@@ -669,17 +666,36 @@ def test_provenance_verifier_uses_oci_bundle_and_fixed_github_identity(
     assert gh_log.read_text(encoding="utf-8").splitlines() == [
         "--version",
         (
-            f"attestation verify oci://{GHCR_IMAGE} "
-            "--repo example/xianyu-connector "
-            "--signer-workflow "
-            "example/xianyu-connector/.github/workflows/docker-image.yml "
+            f"attestation verify oci://{PROVENANCE_IMAGE} "
+            f"--repo {PROVENANCE_GITHUB_REPOSITORY} "
+            "--cert-identity https://github.com/Wangjunkai-1996/"
+            "xianyu-auto-reply-fix/.github/workflows/docker-image.yml@refs/heads/main "
+            "--cert-oidc-issuer https://token.actions.githubusercontent.com "
             "--source-ref refs/heads/main --deny-self-hosted-runners --bundle-from-oci"
         ),
     ]
     assert gh_environment_log.read_text(encoding="utf-8").splitlines() == [
-        "GH_TOKEN=unset",
+        "GH_TOKEN=unused-for-oci-bundle",
         "GITHUB_TOKEN=unset",
     ]
+
+
+def test_provenance_verifier_rejects_github_and_ghcr_repository_mismatch(
+    tmp_path: Path,
+) -> None:
+    verifier, gh_log, _ = _provenance_verifier_with_fake_gh(tmp_path)
+
+    result = _run(
+        verifier,
+        PROVENANCE_IMAGE,
+        PROVENANCE_GHCR_REPOSITORY,
+        "OtherOwner/xianyu-auto-reply-fix",
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 2
+    assert "does not correspond" in result.stderr
+    assert not gh_log.exists()
 
 
 @pytest.mark.parametrize("retry_verification_status", [0, 23], ids=["retry-ok", "retry-fails"])
@@ -725,7 +741,8 @@ def test_root_orchestrator_reconciles_committed_recovery_after_promotion_failure
     )
     (recovery.parent / "current").symlink_to(recovery)
     env_file.write_text(
-        "XIANYU_GHCR_REPOSITORY=ghcr.io/example/xianyu-connector\n",
+        "XIANYU_GHCR_REPOSITORY=ghcr.io/example/xianyu-connector\n"
+        "XIANYU_GITHUB_REPOSITORY=Example/xianyu-connector\n",
         encoding="utf-8",
     )
     orchestrator = _copy_deploy_script(
@@ -752,7 +769,7 @@ def test_root_orchestrator_reconciles_committed_recovery_after_promotion_failure
 
     assert result.returncode == 42
     assert provenance_log.read_text(encoding="utf-8").splitlines() == [
-        f"{GHCR_IMAGE} ghcr.io/example/xianyu-connector"
+        f"{GHCR_IMAGE} ghcr.io/example/xianyu-connector Example/xianyu-connector"
     ]
     assert promote_log.read_text(encoding="utf-8").splitlines() == [f"{GHCR_IMAGE} control"]
     assert verify_log.read_text(encoding="utf-8").splitlines() == [

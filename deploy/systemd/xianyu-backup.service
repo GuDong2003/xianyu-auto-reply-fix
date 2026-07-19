@@ -6,4 +6,4 @@ After=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/xianyu/releases/current
-ExecStart=/usr/bin/docker compose --env-file /opt/xianyu/production.env -f /opt/xianyu/releases/current/compose.production.yml --profile ops run --rm xianyu-backup
+ExecStart=/usr/bin/docker compose --env-file /opt/xianyu-production/production.env -f /opt/xianyu/releases/current/compose.production.yml --profile ops run --rm xianyu-backup

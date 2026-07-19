@@ -77,6 +77,29 @@ def test_connector_live_ready_and_internal_auth(tmp_path: Path) -> None:
     assert missing.status_code == 404
 
 
+def test_internal_health_requires_token_without_account_readiness(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    app = create_connector_app(settings)
+
+    with TestClient(app) as client:
+        missing_token = client.get("/internal/health")
+        invalid_token = client.get(
+            "/internal/health",
+            headers={"X-Connector-Token": "wrong"},
+        )
+        healthy = client.get(
+            "/internal/health",
+            headers={"X-Connector-Token": settings.internal_api_token},
+        )
+        account_readiness = client.get("/health/ready")
+
+    assert missing_token.status_code == 401
+    assert invalid_token.status_code == 401
+    assert healthy.status_code == 200
+    assert healthy.json() == {"status": "healthy"}
+    assert account_readiness.status_code == 503
+
+
 def test_connector_live_fails_when_migration_disappears(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     app = create_connector_app(settings)
@@ -86,9 +109,35 @@ def test_connector_live_fails_when_migration_disappears(tmp_path: Path) -> None:
             connection.execute("DROP TABLE account_runtime_states")
 
         response = client.get("/health/live")
+        internal = client.get(
+            "/internal/health",
+            headers={"X-Connector-Token": settings.internal_api_token},
+        )
 
     assert response.status_code == 503
     assert response.json()["detail"] == "connector migration missing"
+    assert internal.status_code == 503
+    assert internal.json()["detail"] == "connector migration missing"
+
+
+def test_internal_health_auth_precedes_supervisor_liveness(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    app = create_connector_app(settings)
+
+    with TestClient(app) as client:
+        app.state.last_supervisor_tick = time.monotonic() - 31
+        invalid_token = client.get(
+            "/internal/health",
+            headers={"X-Connector-Token": "wrong"},
+        )
+        authenticated = client.get(
+            "/internal/health",
+            headers={"X-Connector-Token": settings.internal_api_token},
+        )
+
+    assert invalid_token.status_code == 401
+    assert authenticated.status_code == 503
+    assert authenticated.json()["detail"] == "supervisor stalled"
 
 
 @pytest.mark.asyncio

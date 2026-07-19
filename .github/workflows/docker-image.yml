@@ -34,7 +34,9 @@ jobs:
   publish:
     needs: quality
     permissions:
+      attestations: write
       contents: read
+      id-token: write
       packages: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -44,8 +46,8 @@ jobs:
     env:
       LOCAL_IMAGE: xianyu-connector:publish-candidate
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Verify vendored noVNC supply chain
         run: |
@@ -75,7 +77,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ steps.image.outputs.name }}
           flavor: latest=false
@@ -87,7 +89,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
 
       - name: Build production candidate once
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: deploy/Dockerfile.production
@@ -116,7 +118,7 @@ jobs:
           exit-code: "1"
 
       - name: Login to GHCR after gates
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -170,19 +172,37 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload immutable digest receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: image-digest-${{ github.sha }}
           path: image-digest.txt
           if-no-files-found: error
           retention-days: 90
 
+      - name: Publish GitHub and OCI build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
   deploy:
     needs: publish
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy }}
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' && inputs.deploy &&
+      github.ref == 'refs/heads/main' && github.ref_protected }}
     environment: production
+    concurrency:
+      group: xianyu-production-deployment
+      cancel-in-progress: false
     permissions: {}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      XIANYU_REMOTE_VERIFICATION_ENABLED: "false"
+      SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+      SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+      SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
     steps:
       - name: Validate protected deployment handoff
         shell: bash
@@ -191,14 +211,84 @@ jobs:
           RELEASE_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          case "$XIANYU_IMAGE" in
-            ghcr.io/*@sha256:*) ;;
-            *) echo "deployment requires an immutable GHCR digest" >&2; exit 2 ;;
-          esac
+          [[ "$XIANYU_IMAGE" =~ ^ghcr\.io/([a-z0-9]+([._-][a-z0-9]+)*/)+[a-z0-9]+([._-][a-z0-9]+)*@sha256:[0-9a-f]{64}$ ]] || {
+            echo "deployment requires a lowercase immutable GHCR digest" >&2
+            exit 2
+          }
           case "$RELEASE_TARGET" in
             control|connector|all) ;;
             *) echo "invalid deployment target: $RELEASE_TARGET" >&2; exit 2 ;;
           esac
-          echo "Validated $XIANYU_IMAGE for target $RELEASE_TARGET" >> "$GITHUB_STEP_SUMMARY"
-          echo "deployment wrapper is not configured; no server changes were made" >&2
-          exit 2
+          [[ "$XIANYU_REMOTE_VERIFICATION_ENABLED" == "false" ]] || {
+            echo "remote verification must remain disabled during production deployment" >&2
+            exit 2
+          }
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || {
+            echo "invalid production SSH user" >&2
+            exit 2
+          }
+          [[ "$SSH_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || {
+            echo "invalid production SSH host" >&2
+            exit 2
+          }
+          [[ "${SSH_PORT:-22}" =~ ^[0-9]{1,5}$ ]] || {
+            echo "invalid production SSH port" >&2
+            exit 2
+          }
+          (( ${SSH_PORT:-22} >= 1 && ${SSH_PORT:-22} <= 65535 )) || {
+            echo "production SSH port is out of range" >&2
+            exit 2
+          }
+
+      - name: Prepare pinned SSH identity
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_PRIVATE_KEY" ]] || { echo "production SSH key is missing" >&2; exit 2; }
+          [[ -n "$SSH_KNOWN_HOSTS" ]] || { echo "pinned production known_hosts is missing" >&2; exit 2; }
+          install -d -m 0700 "$RUNNER_TEMP/xianyu-ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/xianyu-ssh/id"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/xianyu-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/xianyu-ssh/id" "$RUNNER_TEMP/xianyu-ssh/known_hosts"
+          ssh-keygen -y -f "$RUNNER_TEMP/xianyu-ssh/id" >/dev/null
+          ssh-keygen -l -f "$RUNNER_TEMP/xianyu-ssh/known_hosts" >/dev/null
+
+      - name: Deploy immutable digest through forced command
+        shell: bash
+        env:
+          XIANYU_IMAGE: ${{ needs.publish.outputs.image }}
+          RELEASE_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          output="$(ssh \
+            -F /dev/null \
+            -i "$RUNNER_TEMP/xianyu-ssh/id" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$RUNNER_TEMP/xianyu-ssh/known_hosts" \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=2 \
+            -p "${SSH_PORT:-22}" \
+            "$SSH_USER@$SSH_HOST" \
+            -- deploy "$XIANYU_IMAGE" "$RELEASE_TARGET")"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" \
+            | grep -Fqx "XIANYU_DEPLOYMENT_VERIFIED $RELEASE_TARGET $XIANYU_IMAGE"
+          {
+            echo "## Production deployment"
+            echo
+            echo "- Image: \`$XIANYU_IMAGE\`"
+            echo "- Target: \`$RELEASE_TARGET\`"
+            echo "- Remote verification: \`false\`"
+            echo "- Server postflight: passed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove SSH material
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/xianyu-ssh"

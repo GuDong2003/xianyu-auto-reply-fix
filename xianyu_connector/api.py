@@ -122,20 +122,24 @@ def create_connector_app(settings: ConnectorSettings) -> FastAPI:
     app.state.runtime_repository = runtime_repository
 
     def require_internal_token(
-        token: str = Header(alias="X-Connector-Token"),
+        token: str | None = Header(default=None, alias="X-Connector-Token"),
     ) -> None:
-        if not secrets.compare_digest(token, settings.internal_api_token):
+        if token is None or not secrets.compare_digest(token, settings.internal_api_token):
             raise HTTPException(status_code=401, detail="invalid connector token")
 
-    @app.get("/health/live")
-    async def health_live() -> dict[str, object]:
-        age = time.monotonic() - app.state.last_supervisor_tick
+    def verify_connector_liveness() -> float:
+        age = time.monotonic() - float(app.state.last_supervisor_tick)
         if age > 30:
             raise HTTPException(status_code=503, detail="supervisor stalled")
         try:
             database_health.verify()
         except DatabaseHealthError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return age
+
+    @app.get("/health/live")
+    async def health_live() -> dict[str, object]:
+        age = verify_connector_liveness()
         return {"status": "healthy", "supervisor_age_seconds": round(age, 3)}
 
     @app.get("/health/ready")
@@ -149,6 +153,14 @@ def create_connector_app(settings: ConnectorSettings) -> FastAPI:
         if not online:
             raise HTTPException(status_code=503, detail={"online_accounts": []})
         return {"status": "ready", "online_accounts": online}
+
+    @app.get("/internal/health")
+    async def internal_health(
+        token: str | None = Header(default=None, alias="X-Connector-Token"),
+    ) -> dict[str, str]:
+        require_internal_token(token)
+        verify_connector_liveness()
+        return {"status": "healthy"}
 
     @app.post("/internal/accounts/{account_id}/qr-sessions")
     async def create_qr_session(

@@ -35,6 +35,16 @@ set -a
 set +a
 image=$requested_image
 release_target=$requested_release_target
+expected_repository=${XIANYU_GHCR_REPOSITORY:-}
+if ! printf '%s\n' "$expected_repository" \
+    | grep -Eq '^ghcr\.io/([a-z0-9]+([._-][a-z0-9]+)*/)+[a-z0-9]+([._-][a-z0-9]+)*$'; then
+    echo "XIANYU_GHCR_REPOSITORY must fix the allowed lowercase GHCR repository" >&2
+    exit 2
+fi
+case "$image" in
+    "$expected_repository"@sha256:*) ;;
+    *) echo "image repository does not match XIANYU_GHCR_REPOSITORY" >&2; exit 2 ;;
+esac
 release_root=${RELEASE_ROOT:-/opt/xianyu/releases}
 component_root="$release_root/$release_target"
 pre_release_current=
@@ -65,8 +75,17 @@ restore_environment_on_failure() {
         mv -f "$env_backup" "$env_file"
         echo "promotion failed; restored $env_file" >&2
         if [ -n "$pre_release_current" ]; then
-            echo "recover running services with:" >&2
+            echo "recovering the last successful $release_target release" >&2
             echo "RESTORE_CURRENT=true RELEASE_TARGET=$release_target RELEASE_ROOT=$release_root $script_dir/rollback.sh" >&2
+            if ENV_FILE="$env_file" RESTORE_CURRENT=true RELEASE_TARGET="$release_target" \
+                RELEASE_ROOT="$release_root" "$script_dir/rollback.sh"; then
+                echo "automatic recovery completed" >&2
+            else
+                rollback_status=$?
+                echo "automatic recovery failed with status $rollback_status" >&2
+                echo "retry with:" >&2
+                echo "RESTORE_CURRENT=true RELEASE_TARGET=$release_target RELEASE_ROOT=$release_root $script_dir/rollback.sh" >&2
+            fi
         fi
     fi
     exit "$status"

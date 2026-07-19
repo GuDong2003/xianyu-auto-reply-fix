@@ -80,7 +80,8 @@ later step fails, it stops the new connector before restarting the legacy contai
 connector releases refuse to run while the legacy container is still active.
 
 For normal production promotion, install `promote-ghcr-release.sh`, `release.sh`, `rollback.sh`,
-and `compose.production.yml` together in a root-owned deployment directory. The promotion wrapper
+`verify-production-release.sh`, both production deployment entrypoints, and `compose.production.yml`
+together in a root-owned deployment directory. The promotion wrapper
 expects root's Docker client to be authenticated to GHCR with a dedicated package-read credential;
 do not store that credential in `production.env`. The wrapper accepts only lowercase
 `ghcr.io/...@sha256:<64 hex>` references, pulls and verifies the linux/amd64 image, atomically updates
@@ -93,46 +94,112 @@ chmod 0600 /root/.docker/config.json
 install -d -o root -g root -m 0750 /opt/xianyu-production/staging
 install -o root -g root -m 0750 \
   deploy/promote-ghcr-release.sh deploy/release.sh deploy/rollback.sh \
+  deploy/verify-production-release.sh deploy/verify-github-provenance.sh \
+  deploy/production-deploy-root.sh \
   /opt/xianyu-production/staging/
+install -o root -g root -m 0755 deploy/production-deploy-entrypoint.sh \
+  /usr/local/bin/xianyu-production-deploy
 install -o root -g root -m 0644 deploy/compose.production.yml \
   /opt/xianyu-production/staging/compose.production.yml
+```
 
-promote-ghcr-release.sh <ghcr-image@sha256:digest> <control|connector|all>
-ENV_FILE=/opt/xianyu-production/production.env \
-  /opt/xianyu-production/staging/promote-ghcr-release.sh \
+Install GitHub CLI 2.96.0 or newer at the fixed `/usr/bin/gh` path. No additional GitHub PAT is used:
+the provenance verifier loads the OCI bundle with the existing root GHCR authentication in
+`/root/.docker/config.json`. The root orchestrator fails before Docker promotion if the CLI,
+registry authentication, OCI attestation, protected-main source ref, signer workflow, repository
+identity, or GitHub-hosted runner provenance cannot be verified. Its effective policy is:
+
+```sh
+gh attestation verify "oci://$XIANYU_IMAGE" \
+  --repo owner/repository \
+  --signer-workflow owner/repository/.github/workflows/docker-image.yml \
+  --source-ref refs/heads/main \
+  --deny-self-hosted-runners \
+  --bundle-from-oci
+```
+
+Automation must always pass the release target explicitly. Create a dedicated locked-password
+`xianyu-deploy` account used only by the restricted key, disable PTY/forwarding with `restrict`, and
+do not add it to the Docker group. Restrict its SSH key to the checked-in parser so GitHub Actions
+can send only `deploy <digest> <target>`:
+
+```text
+restrict,command="/usr/local/bin/xianyu-production-deploy" ssh-ed25519 AAAA... github-production
+```
+
+Grant passwordless sudo only to the root orchestrator. Do not grant `SETENV`; the orchestrator uses
+`env -i`, fixed executable paths, the fixed `/opt/xianyu-production/production.env`, and a host-level
+`flock` before it invokes the lower-level scripts:
+
+```text
+xianyu-deploy ALL=(root) NOPASSWD: /opt/xianyu-production/staging/production-deploy-root.sh *
+```
+
+Do not configure `AcceptEnv` for deployment variables. Even if the host has unrelated global
+`AcceptEnv` settings, the forced parser ignores them and the root orchestrator clears its child
+environment. Set `XIANYU_GHCR_REPOSITORY=ghcr.io/owner/repository` in the root-owned production env;
+automation rejects every other repository before Docker is invoked.
+
+Configure the GitHub `production` Environment with required reviewers and these secrets:
+`PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_PORT`, `PRODUCTION_SSH_USER`,
+`PRODUCTION_SSH_PRIVATE_KEY`, and a pinned `PRODUCTION_SSH_KNOWN_HOSTS` entry. The workflow never
+uses `ssh-keyscan` and deploys only the digest produced by the gated publish job.
+The repository cannot create or protect that Environment: deployment remains fail-closed until an
+administrator creates it, adds required reviewers, and defines all five environment-scoped secrets.
+The deploy job is code-gated to `refs/heads/main` with `github.ref_protected == true`; dispatches from
+feature branches, including the implementation branch, can publish a candidate but cannot deploy.
+All third-party Actions in the production publisher are pinned to full commit SHAs. The publisher
+creates a GitHub build attestation and pushes the same provenance as an OCI attestation for the
+immutable digest; the server verifies that OCI subject before promotion.
+
+Routine production changes must use the protected GitHub workflow and forced SSH entrypoint. Do not
+invoke `promote-ghcr-release.sh`, `release.sh`, or `rollback.sh` directly: doing so bypasses the root
+orchestrator's provenance gate, environment clearing, and deployment lock. The only supported root
+console break-glass promotion still uses the same orchestrator:
+
+```sh
+/opt/xianyu-production/staging/production-deploy-root.sh \
   ghcr.io/owner/repository@sha256:REPLACE_WITH_64_HEX_IMAGE_DIGEST control
 ```
 
-Automation must always pass the release target explicitly. Install the wrapper as `root:root` mode
-`0750`, invoke it through a forced SSH command or narrow sudo rule, and do not add the deployment
-user to the Docker group.
-
-Normal control-plane releases do not recreate the connector or its account workers:
-
-```sh
-ENV_FILE=/opt/xianyu-production/production.env RELEASE_TARGET=control ./deploy/release.sh
-```
-
-Connector releases must be explicit:
-
-```sh
-ENV_FILE=/opt/xianyu-production/production.env RELEASE_TARGET=connector ./deploy/release.sh
-```
+Choose `connector` or `all` explicitly when those components are intended; `control` remains the
+default operational target in the protected workflow.
 
 Each release creates an SQLite online backup, runs migrations before switching the selected
-component, waits for its health check, and records the immutable image, Compose file, and
-non-secret production environment. Roll back the same component with:
-
-```sh
-RELEASE_TARGET=control ./deploy/rollback.sh
-# or: RELEASE_TARGET=connector ./deploy/rollback.sh
-```
+component, waits for its container health check, and records the immutable image, Compose file, and
+non-secret production environment. The automated postflight additionally verifies `/health/live`,
+loopback-only control port binding, no published connector port, zero container restarts,
+`unless-stopped` restart policy, container health, image digest, release identity, and remote
+verification remaining explicitly disabled. For every target (`control`, `connector`, or `all`) it
+also reads the connector token inside the control container and calls the connector's authenticated
+`/internal/health` endpoint over the Compose network. This prevents a connector-only upgrade from
+bypassing the real control-to-connector path. It intentionally does not require `/health/ready`,
+because a healthy shadow, logged-out, or manual-verification deployment may have no ONLINE account.
+Failed promotions and postflight checks invoke rollback automatically; manual lower-level rollback
+is break-glass only.
 
 Each successful release records the `current` snapshot that preceded it. Normal rollback follows
 that recorded path and never guesses from timestamp-sorted directories, so an incomplete release
 directory cannot become the rollback target. If promotion fails after a service has started but
-before release completion, the wrapper restores `production.env` and prints an explicit
-`RESTORE_CURRENT=true` command that redeploys the last successful `current` snapshot.
+before release completion, the wrapper restores `production.env` and automatically redeploys the
+last successful `current` snapshot. If automated postflight fails after promotion, the forced SSH
+entrypoint invokes normal rollback to the recorded previous release. The root orchestrator also
+re-verifies the immutable digest and full postflight contract after either promotion recovery or
+postflight rollback. Recovery success is reported only after that old `current` release passes;
+the deployment still exits with the original promotion or postflight failure status. Rollback never
+edits a historical snapshot: it creates a new sanitized recovery snapshot with a new release ID,
+the recorded old digest, remote verification disabled, and matching production/current metadata.
+Rollback commits that recovery snapshot as desired `current` and root environment state before
+reconciling containers. If `docker compose up` or release identity verification fails midway, disk
+state remains an explicit, sanitized, retryable old-digest target instead of claiming the failed-new
+release while some containers have already switched back. If normal rollback returns nonzero after
+committing that desired state, the same root orchestrator performs exactly one
+`RESTORE_CURRENT=true` reconciliation retry under the existing `flock`, then runs the complete
+postflight regardless of the retry exit status. A second failure prints the committed current path,
+desired digest, and the exact locked root-orchestrator break-glass command; it never silently leaves
+operators to infer which digest should be reconciled. Promotion failures use the same shared retry
+path when the promotion wrapper has committed a sanitized recovery current but its first postflight
+fails, preventing the promotion and postflight rollback branches from drifting apart.
 
 Image rollback does not undo a database migration. Before any non-backward-compatible migration,
 stop application writes and retain the exact pre-release SQLite backup. Recovery requires stopping

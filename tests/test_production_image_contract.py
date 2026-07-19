@@ -1,3 +1,4 @@
+import re
 import shlex
 import subprocess
 import time
@@ -402,6 +403,41 @@ def test_connector_ruff_gate_covers_release_tests_without_legacy_failures() -> N
     assert "github.event.pull_request" not in ruff_run
 
 
+def test_release_permissions_and_connector_quality_actions_are_pinned() -> None:
+    auto_release_path = PROJECT_ROOT / ".github/workflows/auto-release.yml"
+    connector_quality_path = PROJECT_ROOT / ".github/workflows/connector-quality.yml"
+    auto_release = yaml.load(
+        auto_release_path.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    connector_quality = yaml.load(
+        connector_quality_path.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+
+    assert auto_release["permissions"] == {"contents": "write"}
+    auto_release_actions = [
+        step["uses"]
+        for job in auto_release["jobs"].values()
+        for step in job.get("steps", [])
+        if "uses" in step and not step["uses"].startswith("./")
+    ]
+    assert auto_release_actions
+    assert all(
+        re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in auto_release_actions
+    ), auto_release_actions
+    external_actions = [
+        step["uses"]
+        for job in connector_quality["jobs"].values()
+        for step in job.get("steps", [])
+        if "uses" in step and not step["uses"].startswith("./")
+    ]
+    assert external_actions
+    assert all(
+        re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in external_actions
+    ), external_actions
+
+
 def test_official_image_publish_chain_is_ghcr_only_and_digest_first() -> None:
     workflow_path = PROJECT_ROOT / ".github/workflows/docker-image.yml"
     source = workflow_path.read_text(encoding="utf-8")
@@ -420,7 +456,12 @@ def test_official_image_publish_chain_is_ghcr_only_and_digest_first() -> None:
 
     publish = workflow["jobs"]["publish"]
     assert publish["needs"] == "quality"
-    assert publish["permissions"] == {"contents": "read", "packages": "write"}
+    assert publish["permissions"] == {
+        "attestations": "write",
+        "contents": "read",
+        "id-token": "write",
+        "packages": "write",
+    }
     assert publish["outputs"] == {
         "image": "${{ steps.publish.outputs.image }}",
         "digest": "${{ steps.publish.outputs.digest }}",
@@ -430,6 +471,8 @@ def test_official_image_publish_chain_is_ghcr_only_and_digest_first() -> None:
         for step in publish["steps"]
         if step.get("uses", "").startswith("docker/build-push-action@")
     ]
+    publish_actions = [step["uses"] for step in publish["steps"] if "uses" in step]
+    assert all(len(action.rsplit("@", 1)[1]) == 40 for action in publish_actions)
     assert len(build_steps) == 1
     assert build_steps[0]["with"]["platforms"] == "linux/amd64"
     assert build_steps[0]["with"]["load"] == "true"
@@ -437,7 +480,7 @@ def test_official_image_publish_chain_is_ghcr_only_and_digest_first() -> None:
 
     e2e_index = source.index("--tmpfs /tmp:rw,noexec,nosuid,size=128m")
     supply_chain_index = source.index("sha256sum -c deploy/novnc-source.SHA256SUMS")
-    build_index = source.index("docker/build-push-action@v6")
+    build_index = source.index("docker/build-push-action@")
     login_index = source.index("docker/login-action@")
     push_index = source.index('docker push "$tag"')
     assert supply_chain_index < build_index
@@ -447,7 +490,18 @@ def test_official_image_publish_chain_is_ghcr_only_and_digest_first() -> None:
     assert "DOCKER_PASSWORD" not in source
     assert "ghcr.io/" in source
     assert "docker buildx imagetools inspect" in source
-    assert "actions/upload-artifact@v4" in source
+    assert any(action.startswith("actions/upload-artifact@") for action in publish_actions)
+    attest_steps = [
+        step
+        for step in publish["steps"]
+        if step.get("uses", "").startswith("actions/attest-build-provenance@")
+    ]
+    assert len(attest_steps) == 1
+    assert attest_steps[0]["with"] == {
+        "subject-name": "${{ steps.image.outputs.name }}",
+        "subject-digest": "${{ steps.publish.outputs.digest }}",
+        "push-to-registry": "true",
+    }
     assert "type=sha,prefix=sha-,format=long" in source
     assert "flavor: latest=false" in source
     assert "github.event.release.prerelease == false" in source
@@ -455,20 +509,67 @@ def test_official_image_publish_chain_is_ghcr_only_and_digest_first() -> None:
 
 def test_protected_deploy_handoff_only_receives_digest_and_explicit_target() -> None:
     workflow_path = PROJECT_ROOT / ".github/workflows/docker-image.yml"
-    source = workflow_path.read_text(encoding="utf-8")
-    workflow = yaml.load(source, Loader=yaml.BaseLoader)
+    workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    publish = workflow["jobs"]["publish"]
     deploy = workflow["jobs"]["deploy"]
+    steps = {step["name"]: step for step in deploy["steps"]}
 
+    assert publish["outputs"]["image"] == "${{ steps.publish.outputs.image }}"
+    assert publish["outputs"]["digest"] == "${{ steps.publish.outputs.digest }}"
     assert deploy["needs"] == "publish"
     assert deploy["environment"] == "production"
     assert deploy["permissions"] == {}
     assert "github.event_name == 'workflow_dispatch'" in deploy["if"]
     assert "inputs.deploy" in deploy["if"]
-    step = deploy["steps"][0]
-    assert step["env"] == {
+    assert deploy["env"] == {
+        "XIANYU_REMOTE_VERIFICATION_ENABLED": "false",
+        "SSH_HOST": "${{ secrets.PRODUCTION_SSH_HOST }}",
+        "SSH_PORT": "${{ secrets.PRODUCTION_SSH_PORT }}",
+        "SSH_USER": "${{ secrets.PRODUCTION_SSH_USER }}",
+    }
+    assert all("uses" not in step for step in deploy["steps"])
+
+    handoff_environment = {
         "XIANYU_IMAGE": "${{ needs.publish.outputs.image }}",
         "RELEASE_TARGET": "${{ inputs.target }}",
     }
-    assert "@sha256:" in step["run"]
-    assert "docker push" not in step["run"]
-    assert "deployment wrapper is not configured" in step["run"]
+    validate = steps["Validate protected deployment handoff"]
+    prepare_ssh = steps["Prepare pinned SSH identity"]
+    deploy_digest = steps["Deploy immutable digest through forced command"]
+    cleanup = steps["Remove SSH material"]
+
+    assert validate["env"] == handoff_environment
+    assert deploy_digest["env"] == handoff_environment
+    assert prepare_ssh["env"] == {
+        "SSH_PRIVATE_KEY": "${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}",
+        "SSH_KNOWN_HOSTS": "${{ secrets.PRODUCTION_SSH_KNOWN_HOSTS }}",
+    }
+    assert cleanup["if"] == "${{ always() }}"
+
+    validate_source = validate["run"]
+    assert "@sha256:[0-9a-f]{64}" in validate_source
+    assert "control|connector|all" in validate_source
+    assert '[[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]' in validate_source
+    assert '[[ "$SSH_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]]' in validate_source
+    assert '[[ "${SSH_PORT:-22}" =~ ^[0-9]{1,5}$ ]]' in validate_source
+    assert "<= 65535" in validate_source
+
+    prepare_source = prepare_ssh["run"]
+    assert '[[ -n "$SSH_PRIVATE_KEY" ]]' in prepare_source
+    assert '[[ -n "$SSH_KNOWN_HOSTS" ]]' in prepare_source
+    assert "ssh-keygen -y" in prepare_source
+    assert "ssh-keygen -l" in prepare_source
+
+    deploy_source = deploy_digest["run"]
+    assert "-F /dev/null" in deploy_source
+    assert "BatchMode=yes" in deploy_source
+    assert "IdentitiesOnly=yes" in deploy_source
+    assert "StrictHostKeyChecking=yes" in deploy_source
+    assert '"$SSH_USER@$SSH_HOST" \\' in deploy_source
+    assert '-- deploy "$XIANYU_IMAGE" "$RELEASE_TARGET"' in deploy_source
+    assert 'grep -Fqx "XIANYU_DEPLOYMENT_VERIFIED $RELEASE_TARGET $XIANYU_IMAGE"' in deploy_source
+
+    deploy_job_source = "\n".join(step.get("run", "") for step in deploy["steps"])
+    assert "actions/checkout" not in deploy_job_source
+    assert "./deploy/" not in deploy_job_source
+    assert "docker push" not in deploy_job_source

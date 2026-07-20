@@ -92,7 +92,7 @@ install -d -o root -g root -m 0750 /opt/xianyu-production/staging
 install -o root -g root -m 0750 \
   deploy/promote-ghcr-release.sh deploy/release.sh deploy/rollback.sh \
   deploy/verify-production-release.sh deploy/verify-github-provenance.sh \
-  deploy/production-deploy-root.sh \
+  deploy/production-deploy-root.sh deploy/bootstrap-ghcr-rollback-baseline.sh \
   /opt/xianyu-production/staging/
 install -o root -g root -m 0755 deploy/production-deploy-entrypoint.sh \
   /usr/local/bin/xianyu-production-deploy
@@ -143,6 +143,14 @@ must match case-insensitively; automation rejects a mismatch or every other GHCR
 Docker is invoked. The case-preserving value is required because the certificate SAN comparison is
 exact and GitHub owner casing is significant there.
 
+The first GHCR rollback compatibility baseline is a fixed trust tuple, not an arbitrary older image.
+Configure `XIANYU_GHCR_ROLLBACK_BASELINE_IMAGE`, `XIANYU_GHCR_ROLLBACK_BASELINE_RUN_ID`, and
+`XIANYU_GHCR_ROLLBACK_BASELINE_COMMIT` with the reviewed immutable digest, successful Actions run,
+and full image revision commit. Pin the reviewed current Compose file separately with
+`XIANYU_GHCR_ROLLBACK_BASELINE_COMPOSE_SHA256`. The bootstrap requires its image and run arguments
+to match these values and verifies the pulled image's OCI source and revision labels before writing
+a snapshot.
+
 Configure the GitHub `production` Environment with required reviewers and these secrets:
 `PRODUCTION_SSH_HOST`, `PRODUCTION_SSH_PORT`, `PRODUCTION_SSH_USER`,
 `PRODUCTION_SSH_PRIVATE_KEY`, and a pinned `PRODUCTION_SSH_KNOWN_HOSTS` entry. The workflow never
@@ -154,6 +162,30 @@ feature branches, including the implementation branch, can publish a candidate b
 All third-party Actions in the production publisher are pinned to full commit SHAs. The publisher
 creates a GitHub build attestation and pushes the same provenance as an OCI attestation for the
 immutable digest; the server verifies that OCI subject before promotion.
+
+After the first successful legacy-to-GHCR `all` promotion, create a trusted GHCR rollback baseline
+before any later production deployment. The current release still records the legacy snapshot as
+its `previous-current`; that local-image snapshot cannot satisfy the immutable GHCR rollback policy.
+Run the root-only bootstrap once with the trusted old GHCR digest and the GitHub Actions run that
+produced it:
+
+```sh
+/opt/xianyu-production/staging/bootstrap-ghcr-rollback-baseline.sh \
+  ghcr.io/wangjunkai-1996/xianyu-auto-reply-fix@sha256:1190e6a3195b63d108b2d4db0a09482b468b9687545220525d56c138d9254499 \
+  all \
+  29699661211
+```
+
+The bootstrap shares the production deployment lock and verifies the fixed trust tuple, requested
+digest, `linux/amd64` platform, and image source/revision labels. It keeps the legacy snapshot only as
+the environment and source-history input; the baseline copies the current trusted GHCR release's
+Compose file so release identity variables exist. Before changing rollback metadata, it expands that
+Compose configuration and requires both control and connector services to contain the new release id
+and asset revision. The resulting snapshot records the original legacy path, source run, source
+commit, and Compose hash, forces remote verification off, and atomically changes only the current
+release's `previous-current` file. It does not switch either `current` symlink and does not create,
+start, stop, or restart containers. Repeated execution with the same arguments validates and reuses
+the same deterministic baseline; any conflicting or incomplete state fails closed.
 
 Routine production changes must use the protected GitHub workflow and forced SSH entrypoint. Do not
 invoke `promote-ghcr-release.sh`, `release.sh`, or `rollback.sh` directly: doing so bypasses the root
@@ -174,9 +206,15 @@ non-secret production environment. The automated postflight additionally verifie
 loopback-only control port binding, no published connector port, zero container restarts,
 `unless-stopped` restart policy, container health, image digest, release identity, and remote
 verification remaining explicitly disabled. For every target (`control`, `connector`, or `all`) it
-also reads the connector token inside the control container and calls the connector's authenticated
-`/internal/health` endpoint over the Compose network. This prevents a connector-only upgrade from
-bypassing the real control-to-connector path. It intentionally does not require `/health/ready`,
+also checks the connector's `/health/live`, reads the connector token inside the control container,
+and calls the connector's authenticated `/internal/health` endpoint over the Compose network. A
+trusted older GHCR image that predates this endpoint can fall back on HTTP 404 only when the expected
+image equals the fixed baseline digest and the release snapshot contains the exact configured image,
+run, commit, and `XIANYU_INTERNAL_HEALTH_PROBE=legacy-qr-404` marker. The authenticated read-only
+lookup for a deliberately missing QR session must then return 404; 401 or every other result fails
+verification. This prevents a connector-only upgrade from bypassing the real control-to-connector
+path or granting fallback behavior to an unreviewed image. It intentionally does not require
+`/health/ready`,
 because a healthy shadow, logged-out, or manual-verification deployment may have no ONLINE account.
 Failed promotions and postflight checks invoke rollback automatically; manual lower-level rollback
 is break-glass only.

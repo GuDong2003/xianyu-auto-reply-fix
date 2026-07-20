@@ -96,6 +96,46 @@ case "$source_image" in
     *) echo "rollback image is outside XIANYU_GHCR_REPOSITORY" >&2; exit 2 ;;
 esac
 
+source_baseline_run_id=$(sed -n 's/^XIANYU_BASELINE_SOURCE_RUN_ID=//p' "$source_release_env")
+source_baseline_commit=$(sed -n 's/^XIANYU_BASELINE_SOURCE_COMMIT=//p' "$source_release_env")
+source_internal_health_probe=$(sed -n 's/^XIANYU_INTERNAL_HEALTH_PROBE=//p' "$source_release_env")
+source_original_legacy=$(sed -n 's/^XIANYU_BASELINE_ORIGINAL_RELEASE=//p' "$source_release_env")
+baseline_metadata=false
+if [ -n "$source_baseline_run_id$source_baseline_commit" ] \
+    || [ -n "$source_internal_health_probe$source_original_legacy" ]; then
+    trusted_baseline_image=$(sed -n 's/^XIANYU_GHCR_ROLLBACK_BASELINE_IMAGE=//p' "$repository_source")
+    trusted_baseline_run_id=$(sed -n 's/^XIANYU_GHCR_ROLLBACK_BASELINE_RUN_ID=//p' "$repository_source")
+    trusted_baseline_commit=$(sed -n 's/^XIANYU_GHCR_ROLLBACK_BASELINE_COMMIT=//p' "$repository_source")
+    trusted_baseline_compose_sha=$(sed -n 's/^XIANYU_GHCR_ROLLBACK_BASELINE_COMPOSE_SHA256=//p' "$repository_source")
+    if [ "$source_image" != "$trusted_baseline_image" ] \
+        || [ "$source_baseline_run_id" != "$trusted_baseline_run_id" ] \
+        || [ "$source_baseline_commit" != "$trusted_baseline_commit" ] \
+        || [ "$source_internal_health_probe" != "legacy-qr-404" ]; then
+        echo "rollback baseline metadata does not match the fixed trust tuple" >&2
+        exit 2
+    fi
+    if ! printf '%s\n' "$source_baseline_run_id" | grep -Eq '^[1-9][0-9]*$' \
+        || ! printf '%s\n' "$source_baseline_commit" | grep -Eq '^[0-9a-f]{40}$' \
+        || ! printf '%s\n' "$trusted_baseline_compose_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+        echo "rollback baseline metadata is malformed" >&2
+        exit 2
+    fi
+    case "$source_original_legacy" in
+        "$component_root"/*) ;;
+        *) echo "rollback baseline legacy source escapes its component root" >&2; exit 2 ;;
+    esac
+    if [ ! -d "$source_original_legacy" ]; then
+        echo "rollback baseline legacy source is unavailable" >&2
+        exit 2
+    fi
+    actual_compose_sha=$(sha256sum "$source_compose" | awk '{print $1}')
+    if [ "$actual_compose_sha" != "$trusted_baseline_compose_sha" ]; then
+        echo "rollback baseline compose hash does not match its metadata" >&2
+        exit 2
+    fi
+    baseline_metadata=true
+fi
+
 recovery_id="$(date -u +%Y%m%dT%H%M%SZ)-rollback-$$"
 recovery_dir="$component_root/$recovery_id"
 mkdir -p "$recovery_dir"
@@ -135,6 +175,12 @@ PY
 printf 'XIANYU_IMAGE=%s\nRELEASE_TARGET=%s\nXIANYU_RELEASE_ID=%s\nXIANYU_ASSET_REVISION=%s\n' \
     "$source_image" "$release_target" "$recovery_id" "$source_asset_revision" \
     > "$recovery_dir/release.env"
+if [ "$baseline_metadata" = "true" ]; then
+    printf 'XIANYU_BASELINE_SOURCE_RUN_ID=%s\nXIANYU_BASELINE_SOURCE_COMMIT=%s\nXIANYU_INTERNAL_HEALTH_PROBE=%s\nXIANYU_BASELINE_ORIGINAL_RELEASE=%s\n' \
+        "$source_baseline_run_id" "$source_baseline_commit" \
+        "$source_internal_health_probe" "$source_original_legacy" \
+        >> "$recovery_dir/release.env"
+fi
 if [ -r "$source_release/previous-current" ]; then
     install -m 0600 "$source_release/previous-current" "$recovery_dir/previous-current"
 fi

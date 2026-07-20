@@ -38,6 +38,31 @@ case "$expected_image" in
     "$expected_repository"@sha256:*) ;;
     *) echo "expected image repository is not allowed" >&2; exit 2 ;;
 esac
+trusted_baseline_image=${XIANYU_GHCR_ROLLBACK_BASELINE_IMAGE:-}
+trusted_baseline_run_id=${XIANYU_GHCR_ROLLBACK_BASELINE_RUN_ID:-}
+trusted_baseline_commit=${XIANYU_GHCR_ROLLBACK_BASELINE_COMMIT:-}
+trusted_baseline_compose_sha=${XIANYU_GHCR_ROLLBACK_BASELINE_COMPOSE_SHA256:-}
+if ! printf '%s\n' "$trusted_baseline_image" \
+    | grep -Eq '^ghcr\.io/([a-z0-9]+([._-][a-z0-9]+)*/)+[a-z0-9]+([._-][a-z0-9]+)*@sha256:[0-9a-f]{64}$'; then
+    echo "XIANYU_GHCR_ROLLBACK_BASELINE_IMAGE must be an immutable GHCR digest" >&2
+    exit 2
+fi
+case "$trusted_baseline_image" in
+    "$expected_repository"@sha256:*) ;;
+    *) echo "rollback baseline image repository is not allowed" >&2; exit 2 ;;
+esac
+if ! printf '%s\n' "$trusted_baseline_run_id" | grep -Eq '^[1-9][0-9]*$'; then
+    echo "XIANYU_GHCR_ROLLBACK_BASELINE_RUN_ID must be a positive run id" >&2
+    exit 2
+fi
+if ! printf '%s\n' "$trusted_baseline_commit" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "XIANYU_GHCR_ROLLBACK_BASELINE_COMMIT must be a full lowercase commit" >&2
+    exit 2
+fi
+if ! printf '%s\n' "$trusted_baseline_compose_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "XIANYU_GHCR_ROLLBACK_BASELINE_COMPOSE_SHA256 must be a lowercase sha256" >&2
+    exit 2
+fi
 if [ "${XIANYU_IMAGE:-}" != "$expected_image" ]; then
     echo "production environment image does not match requested digest" >&2
     exit 2
@@ -77,6 +102,10 @@ done
 recorded_image=$(sed -n 's/^XIANYU_IMAGE=//p' "$release_env")
 release_id=$(sed -n 's/^XIANYU_RELEASE_ID=//p' "$release_env")
 asset_revision=$(sed -n 's/^XIANYU_ASSET_REVISION=//p' "$release_env")
+recorded_baseline_run_id=$(sed -n 's/^XIANYU_BASELINE_SOURCE_RUN_ID=//p' "$release_env")
+recorded_baseline_commit=$(sed -n 's/^XIANYU_BASELINE_SOURCE_COMMIT=//p' "$release_env")
+recorded_internal_health_probe=$(sed -n 's/^XIANYU_INTERNAL_HEALTH_PROBE=//p' "$release_env")
+snapshot_compose_sha=$(sha256sum "$compose_file" | awk '{print $1}')
 if [ "$recorded_image" != "$expected_image" ]; then
     echo "release snapshot image does not match requested digest" >&2
     exit 2
@@ -201,10 +230,41 @@ verify_control_to_connector() {
         echo "control container is not healthy for connector path verification" >&2
         exit 1
     fi
-    docker exec -i "$control_id" python - <<'PY'
+    docker exec -i "$control_id" python - \
+        "$expected_image" \
+        "$trusted_baseline_image" \
+        "$trusted_baseline_run_id" \
+        "$trusted_baseline_commit" \
+        "$trusted_baseline_compose_sha" \
+        "$recorded_baseline_run_id" \
+        "$recorded_baseline_commit" \
+        "$recorded_internal_health_probe" \
+        "$snapshot_compose_sha" <<'PY'
 import json
+import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
+
+(
+    expected_image,
+    trusted_baseline_image,
+    trusted_baseline_run_id,
+    trusted_baseline_commit,
+    trusted_baseline_compose_sha,
+    recorded_baseline_run_id,
+    recorded_baseline_commit,
+    recorded_internal_health_probe,
+    snapshot_compose_sha,
+) = sys.argv[1:]
+
+with urllib.request.urlopen(
+    "http://xianyu-connector:8091/health/live",
+    timeout=5,
+) as response:
+    live_payload = json.load(response)
+if live_payload.get("status") != "healthy":
+    raise SystemExit(f"connector liveness mismatch: {live_payload!r}")
 
 token = Path("/run/secrets/connector_internal_token").read_text(encoding="utf-8").strip()
 if not token:
@@ -213,10 +273,39 @@ request = urllib.request.Request(
     "http://xianyu-connector:8091/internal/health",
     headers={"X-Connector-Token": token},
 )
-with urllib.request.urlopen(request, timeout=5) as response:
-    payload = json.load(response)
-if payload != {"status": "healthy"}:
-    raise SystemExit(f"connector internal health mismatch: {payload!r}")
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+except urllib.error.HTTPError as exc:
+    if exc.code != 404:
+        raise SystemExit(f"connector internal health failed with HTTP {exc.code}") from exc
+else:
+    if payload != {"status": "healthy"}:
+        raise SystemExit(f"connector internal health mismatch: {payload!r}")
+    raise SystemExit(0)
+
+fallback_allowed = (
+    expected_image == trusted_baseline_image
+    and recorded_baseline_run_id == trusted_baseline_run_id
+    and recorded_baseline_commit == trusted_baseline_commit
+    and snapshot_compose_sha == trusted_baseline_compose_sha
+    and recorded_internal_health_probe == "legacy-qr-404"
+)
+if not fallback_allowed:
+    raise SystemExit("connector image is not authorized for the legacy internal health fallback")
+
+legacy_request = urllib.request.Request(
+    "http://xianyu-connector:8091/internal/accounts/"
+    "__deployment_probe__/qr-sessions/__missing__",
+    headers={"X-Connector-Token": token},
+)
+try:
+    urllib.request.urlopen(legacy_request, timeout=5)
+except urllib.error.HTTPError as exc:
+    if exc.code != 404:
+        raise SystemExit(f"legacy connector probe failed with HTTP {exc.code}") from exc
+else:
+    raise SystemExit("legacy connector probe unexpectedly found the missing QR session")
 PY
 }
 

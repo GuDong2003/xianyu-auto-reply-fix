@@ -1,10 +1,12 @@
 # 🐟 闲鱼管理系统
 
-[![GitHub](https://img.shields.io/badge/GitHub-GuDong2003%2Fxianyu--auto--reply--fix-blue?logo=github)](https://github.com/GuDong2003/xianyu-auto-reply-fix)
+[![GitHub Stars](https://img.shields.io/github/stars/GuDong2003/xianyu-auto-reply-fix?style=flat&logo=github)](https://github.com/GuDong2003/xianyu-auto-reply-fix/stargazers)
+[![Latest Release](https://img.shields.io/github/v/release/GuDong2003/xianyu-auto-reply-fix?logo=github)](https://github.com/GuDong2003/xianyu-auto-reply-fix/releases/latest)
+[![Docker Image](https://github.com/GuDong2003/xianyu-auto-reply-fix/actions/workflows/docker-image.yml/badge.svg?branch=main)](https://github.com/GuDong2003/xianyu-auto-reply-fix/actions/workflows/docker-image.yml)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-源码构建-blue?logo=docker)](#-快速开始)
 [![Python](https://img.shields.io/badge/Python-3.11+-green?logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Usage](https://img.shields.io/badge/Usage-仅供学习-red.svg)](#️-版权声明与使用条款)
+[![Usage](https://img.shields.io/badge/Usage-仅供学习-red.svg)](LICENSE)
 
 ## 📋 项目概述
 
@@ -23,6 +25,23 @@
 - **监控维护**：支持实时日志、健康检查、安全统计、系统统计和日志文件轮转。
 - **容器化部署**：支持本地运行、Docker Compose 和多架构构建。
 
+## 🔐 部署前必读
+
+- `docker-compose.yml` 中的默认管理员密码和 JWT 密钥仅用于本地体验，正式或联网部署前必须覆盖。
+- 不要把 `5900`（VNC）和 `6080`（noVNC）直接暴露到公网；远程访问应配合防火墙、访问控制和可信网络。
+- 对外提供 Web 管理界面时，请使用 HTTPS 反向代理，并限制管理端访问来源。
+- `data/`、`logs/`、`backups/` 和 `global_config.yml` 可能包含运行数据或敏感配置，不要提交到 Git，也不要随 Issue/PR 上传。
+- Cookie、Token、账号密码和数据库凭据均属于敏感信息；公开日志和截图前请先脱敏。
+
+在仓库根目录创建 `.env`，至少覆盖以下配置：
+
+```dotenv
+ADMIN_PASSWORD=replace-with-a-strong-password
+JWT_SECRET_KEY=replace-with-a-long-random-string
+```
+
+更多安全边界和漏洞反馈方式见 [Security Policy](SECURITY.md)。
+
 ## 🚀 快速开始
 
 ### Docker Compose（推荐）
@@ -33,11 +52,17 @@ cd xianyu-auto-reply-fix
 docker compose up -d
 ```
 
+仅在修改了 `Dockerfile` 或依赖文件、需要本地重新构建镜像时，使用 `docker compose up -d --build`。
+
 默认访问：
 
 - Web 管理界面：`http://localhost:9000`
 - API 文档：`http://localhost:9000/docs`
 - 健康检查：`http://localhost:9000/health`
+
+首次初始化的默认管理员账号为 `admin` / `admin123`。该默认值仅用于本地初始化，请在首次登录后立即修改，并确保 `.env` 中已设置独立的强密码和 JWT 密钥。
+
+默认持久化目录为 `data/`、`logs/` 和 `backups/`；升级或重建容器前请先备份。
 
 ### 本地运行
 
@@ -132,7 +157,15 @@ AI 回复使用统一的 `model_name` / `api_key` / `base_url` / `api_type` 配�
 4. 推送分支：`git push origin feature/your-feature`。
 5. 提交 Pull Request。
 
-贡献前建议先查看 [Issues](https://github.com/GuDong2003/xianyu-auto-reply-fix/issues)，并确保变更不引入真实 Cookie、Token、数据库文件或其他敏感信息。
+提交前请注意：
+
+- 建议一个 PR 只解决一个主题；大型重构、依赖升级和部署改造请尽量拆分。
+- 涉及默认行为或兼容性的变更，应说明影响范围、迁移方式和回滚方案，并尽量保留已有使用路径。
+- 新功能和缺陷修复应补充相应测试；用户可见行为变化请同步更新文档。
+- 不要提交真实 Cookie、Token、账号密码、数据库、日志或其他敏感信息。
+- 安全漏洞不要通过公开 Issue 披露，请遵循 [Security Policy](SECURITY.md)。
+
+贡献前建议先查看 [Issues](https://github.com/GuDong2003/xianyu-auto-reply-fix/issues) 和现有 Pull Request，避免重复工作。
 
 ## ❓ 常见问题
 
@@ -177,6 +210,8 @@ docker compose up -d
 本项目基于原项目整理和修复，采用 **GNU Affero General Public License v3.0（AGPL-3.0）** 开源协议。项目定位为学习与研究使用，请勿用于任何违法违规场景。
 
 使用、修改、分发或通过网络提供服务时，应遵守 AGPL-3.0 的源码提供、版权声明保留等要求。使用者需自行承担部署、配置和运行风险，并确保实际用途符合当地法律法规和平台规则。
+
+本项目是社区维护的非官方项目，与闲鱼、阿里巴巴及其关联公司无隶属、授权、认可或合作关系。平台接口、风控规则和页面结构可能随时变化，由此导致的功能中断不构成维护者承诺。
 
 本项目按“现状”提供，不提供任何明示或暗示的保证；因使用本项目产生的风险、损失或责任，由使用者自行承担。
 

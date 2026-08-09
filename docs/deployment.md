@@ -15,6 +15,28 @@
 - **浏览器依赖**: Playwright Chromium（本地运行需要安装）
 - **资源建议**: 建议 2GB+ 内存，预留 10GB+ 存储空间
 
+## 部署前安全配置
+
+`docker-compose.yml` 内置的默认管理员密码和 JWT 密钥仅用于本地初始化。正式或联网部署前，请在仓库根目录创建 `.env` 并至少设置：
+
+```dotenv
+ADMIN_PASSWORD=replace-with-a-strong-password
+JWT_SECRET_KEY=replace-with-a-long-random-string
+```
+
+可以使用本地密码管理器或安全随机数工具生成密钥，例如：
+
+```bash
+openssl rand -hex 32
+```
+
+同时请注意：
+
+- 首次登录后立即修改默认管理员密码。
+- 不要将 `.env`、Cookie、Token、数据库、日志或备份提交到 Git。
+- 默认 Compose 会映射 `5900` 和 `6080` 供 VNC/noVNC 使用，不要把这两个端口直接开放到公网。
+- 对外提供 Web 管理界面时，请使用 HTTPS 反向代理、防火墙和访问控制。
+
 ## 方式一：使用部署脚本（推荐）
 
 ### Linux / macOS
@@ -55,6 +77,8 @@ git clone https://github.com/GuDong2003/xianyu-auto-reply-fix.git
 cd xianyu-auto-reply-fix
 docker compose up -d
 ```
+
+仅在修改了 `Dockerfile` 或依赖文件、需要本地重新构建镜像时，使用 `docker compose up -d --build`。
 
 访问：`http://localhost:9000`
 
@@ -105,8 +129,9 @@ python Start.py
 
 说明：
 
-- 当前仓库未包含 GitHub Actions 自动构建配置
-- 镜像仓库地址请以实际发布情况为准
+- 仓库通过 GitHub Actions 在 `main` 更新、手动触发或发布 Release 时构建多架构镜像。
+- 官方 GHCR 镜像地址为 `ghcr.io/gudong2003/xianyu-auto-reply-fix`；具体可用标签以 [Packages](https://github.com/GuDong2003/xianyu-auto-reply-fix/pkgs/container/xianyu-auto-reply-fix) 和 [Releases](https://github.com/GuDong2003/xianyu-auto-reply-fix/releases) 为准。
+- Docker Hub 仅在维护者配置了对应发布凭据时同步，不能作为必然可用的发布渠道。
 
 ## 访问地址
 

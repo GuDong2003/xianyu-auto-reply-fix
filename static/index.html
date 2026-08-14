@@ -829,11 +829,11 @@
               <div class="card-header d-flex justify-content-between align-items-center">
                 <div>
                   <h5 class="mb-1">发布表单</h5>
-                  <div class="text-muted small">第一版支持单商品发布、多图上传、价格与运费配置。</div>
+                  <div class="text-muted small">支持普通商品与网页端多规格发布，可保存素材后批量使用。</div>
                 </div>
                 <div class="d-flex align-items-center gap-2">
                   <span class="badge text-bg-light border" id="publishMaterialModeBadge">新建素材</span>
-                  <span class="badge text-bg-light border">单商品</span>
+                  <span class="badge text-bg-light border" id="publishSkuModeBadge">普通商品</span>
                 </div>
               </div>
               <div class="card-body">
@@ -871,7 +871,7 @@
                       <textarea class="form-control" id="publishDescription" rows="5" maxlength="5000" placeholder="输入商品描述，建议包含成色、规格、发货说明等信息" required></textarea>
                     </div>
 
-                    <div class="col-md-4">
+                    <div class="col-md-4" id="publishCurrentPriceWrap">
                       <label for="publishCurrentPrice" class="form-label">现价</label>
                       <div class="input-group">
                         <span class="input-group-text">¥</span>
@@ -879,7 +879,7 @@
                       </div>
                     </div>
 
-                    <div class="col-md-4">
+                    <div class="col-md-4" id="publishOriginalPriceWrap">
                       <label for="publishOriginalPrice" class="form-label">原价</label>
                       <div class="input-group">
                         <span class="input-group-text">¥</span>
@@ -899,6 +899,43 @@
                       <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" id="publishCanSelfPickup">
                         <label class="form-check-label" for="publishCanSelfPickup">支持买家自提</label>
+                      </div>
+                    </div>
+
+                    <div class="col-12">
+                      <div class="item-publish-sku-panel">
+                        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                          <div>
+                            <div class="fw-semibold">商品规格</div>
+                            <div class="text-muted small">复刻闲鱼网页端规格规则，最多添加两组规格。</div>
+                          </div>
+                          <div class="form-check form-switch mb-0">
+                            <input
+                              class="form-check-input"
+                              type="checkbox"
+                              role="switch"
+                              id="publishSkuEnabled"
+                              onchange="handleItemPublishSkuToggle()"
+                            >
+                            <label class="form-check-label" for="publishSkuEnabled">启用多规格</label>
+                          </div>
+                        </div>
+
+                        <div id="publishSkuEditor" class="mt-3" style="display: none;">
+                          <div class="alert alert-light border small py-2 mb-3">
+                            默认类型包括颜色、尺码、容量、份数、大小、高度和总量；也可以输入 2～4 个字的自定义类型。
+                          </div>
+                          <div id="publishSkuPropertyList" class="item-publish-sku-property-list"></div>
+                          <button
+                            type="button"
+                            class="btn btn-sm btn-outline-primary mt-3"
+                            id="publishSkuAddPropertyBtn"
+                            onclick="addItemPublishSkuProperty()"
+                          >
+                            <i class="bi bi-plus-circle me-1"></i>添加规格类型（0/2）
+                          </button>
+                          <div id="publishSkuCombinationWrap" class="mt-4"></div>
+                        </div>
                       </div>
                     </div>
 

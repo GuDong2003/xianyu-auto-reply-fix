@@ -1255,11 +1255,17 @@ Cookie数量: {cookie_count}
             brand TEXT,
             condition TEXT DEFAULT '全新',
             remark TEXT,
+            sku_config TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         ''')
+        cursor.execute("PRAGMA table_info(product_materials)")
+        product_material_columns = {column[1] for column in cursor.fetchall()}
+        if 'sku_config' not in product_material_columns:
+            self._execute_sql(cursor, "ALTER TABLE product_materials ADD COLUMN sku_config TEXT")
+            logger.info("数据库迁移完成：product_materials 添加 sku_config 列")
         self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_product_materials_user_time ON product_materials(user_id, created_at DESC)")
 
         self._execute_sql(cursor, '''
@@ -10015,11 +10021,12 @@ Cookie数量: {cookie_count}
             try:
                 cursor = self.conn.cursor()
                 images_text = self._json_dumps_safe(data.get('images') or [])
+                sku_config_text = self._json_dumps_safe(data.get('sku_config'))
                 cursor.execute('''
                     INSERT INTO product_materials (
                         user_id, title, description, price, original_price, category, images,
-                        delivery_method, postage, can_self_pickup, brand, condition, remark
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        delivery_method, postage, can_self_pickup, brand, condition, remark, sku_config
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     user_id,
                     str(data.get('title') or '').strip(),
@@ -10034,6 +10041,7 @@ Cookie数量: {cookie_count}
                     data.get('brand'),
                     data.get('condition') or '全新',
                     data.get('remark'),
+                    sku_config_text,
                 ))
                 material_id = cursor.lastrowid
                 self.conn.commit()
@@ -10059,8 +10067,9 @@ Cookie数量: {cookie_count}
             'brand': row[11],
             'condition': row[12],
             'remark': row[13],
-            'created_at': row[14],
-            'updated_at': row[15],
+            'sku_config': self._json_loads_safe(row[14], None),
+            'created_at': row[15],
+            'updated_at': row[16],
         }
 
     def get_product_material(self, material_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
@@ -10071,7 +10080,7 @@ Cookie数量: {cookie_count}
                 params = [material_id]
                 sql = '''
                     SELECT id, user_id, title, description, price, original_price, category, images,
-                           delivery_method, postage, can_self_pickup, brand, condition, remark,
+                           delivery_method, postage, can_self_pickup, brand, condition, remark, sku_config,
                            created_at, updated_at
                     FROM product_materials
                     WHERE id = ?
@@ -10104,7 +10113,7 @@ Cookie数量: {cookie_count}
                 total = int(cursor.fetchone()[0] or 0)
                 cursor.execute(f'''
                     SELECT id, user_id, title, description, price, original_price, category, images,
-                           delivery_method, postage, can_self_pickup, brand, condition, remark,
+                           delivery_method, postage, can_self_pickup, brand, condition, remark, sku_config,
                            created_at, updated_at
                     FROM product_materials
                     {where_sql}
@@ -10142,7 +10151,7 @@ Cookie数量: {cookie_count}
                 params: List[Any] = list(ids)
                 sql = f'''
                     SELECT id, user_id, title, description, price, original_price, category, images,
-                           delivery_method, postage, can_self_pickup, brand, condition, remark,
+                           delivery_method, postage, can_self_pickup, brand, condition, remark, sku_config,
                            created_at, updated_at
                     FROM product_materials
                     WHERE id IN ({placeholders})
@@ -10161,7 +10170,8 @@ Cookie数量: {cookie_count}
         """更新商品发布素材。"""
         allowed_fields = {
             'title', 'description', 'price', 'original_price', 'category', 'images',
-            'delivery_method', 'postage', 'can_self_pickup', 'brand', 'condition', 'remark'
+            'delivery_method', 'postage', 'can_self_pickup', 'brand', 'condition', 'remark',
+            'sku_config'
         }
         update_fields = []
         params = []
@@ -10170,6 +10180,8 @@ Cookie数量: {cookie_count}
                 continue
             if key == 'images':
                 value = self._json_dumps_safe(value or [])
+            elif key == 'sku_config':
+                value = self._json_dumps_safe(value) if value else None
             elif key == 'can_self_pickup':
                 value = 1 if value else 0
             update_fields.append(f"{key} = ?")

@@ -35,6 +35,7 @@ from utils.qr_login import qr_login_manager
 from utils.qr_login_lite import qrcode_login_lite
 from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
+from utils.product_sku import ProductSkuValidationError, normalize_sku_config
 from utils.time_utils import (
     LOCAL_TIMEZONE,
     get_local_now,
@@ -10159,6 +10160,7 @@ class ProductMaterialRequest(BaseModel):
     brand: Optional[str] = None
     condition: Optional[str] = "全新"
     remark: Optional[str] = None
+    sku_config: Optional[Dict[str, Any]] = None
 
 
 class ProductMaterialUpdateRequest(BaseModel):
@@ -10174,6 +10176,7 @@ class ProductMaterialUpdateRequest(BaseModel):
     brand: Optional[str] = None
     condition: Optional[str] = None
     remark: Optional[str] = None
+    sku_config: Optional[Dict[str, Any]] = None
 
 
 class ProductBatchPublishRequest(BaseModel):
@@ -10194,6 +10197,7 @@ class ProductSinglePublishRequest(BaseModel):
     category: Optional[str] = None
     brand: Optional[str] = None
     condition: Optional[str] = "全新"
+    sku_config: Optional[Dict[str, Any]] = None
 
 
 def _parse_optional_non_negative_float(value: Any, field_label: str) -> Optional[float]:
@@ -10374,8 +10378,6 @@ def _normalize_product_publish_data(data: Dict[str, Any], *, partial: bool = Fal
 
     current_price = normalized.get('price') if 'price' in normalized else data.get('price')
     original_price = normalized.get('original_price') if 'original_price' in normalized else data.get('original_price')
-    if original_price is not None and current_price is None:
-        raise HTTPException(status_code=400, detail="填写原价时必须同时填写现价")
 
     if 'delivery_method' in data or not partial:
         delivery_method = str(data.get('delivery_method') or '包邮').strip() or '包邮'
@@ -10393,6 +10395,16 @@ def _normalize_product_publish_data(data: Dict[str, Any], *, partial: bool = Fal
         if not isinstance(images, list):
             raise HTTPException(status_code=400, detail="商品图片必须是数组")
         normalized['images'] = images
+
+    if 'sku_config' in data or not partial:
+        try:
+            normalized['sku_config'] = normalize_sku_config(data.get('sku_config'))
+        except ProductSkuValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    sku_enabled = bool((normalized.get('sku_config') or {}).get('enabled'))
+    if original_price is not None and current_price is None and not sku_enabled:
+        raise HTTPException(status_code=400, detail="填写原价时必须同时填写现价")
 
     return normalized
 
@@ -10449,6 +10461,7 @@ async def _publish_product_to_account(
     post_price: Optional[float],
     can_self_pickup: bool,
     category_hint: Optional[str] = None,
+    sku_config: Optional[Dict[str, Any]] = None,
     material_id: Optional[int] = None,
     batch_id: Optional[str] = None,
     log_id: Optional[int] = None,
@@ -10474,8 +10487,12 @@ async def _publish_product_to_account(
     current_price_value = _parse_optional_non_negative_float(current_price, "现价")
     original_price_value = _parse_optional_non_negative_float(original_price, "原价")
     post_price_value = _parse_optional_non_negative_float(post_price, "邮费")
+    try:
+        normalized_sku_config = normalize_sku_config(sku_config)
+    except ProductSkuValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if original_price_value is not None and current_price_value is None:
+    if original_price_value is not None and current_price_value is None and not normalized_sku_config:
         raise HTTPException(status_code=400, detail="填写原价时必须同时填写现价")
     if delivery_choice not in PRODUCT_PUBLISH_DELIVERY_CHOICES:
         raise HTTPException(status_code=400, detail="不支持的运费方式")
@@ -10500,7 +10517,8 @@ async def _publish_product_to_account(
     try:
         logger.info(
             f"{user_prefix} 开始发布商品: cookie_id={cleaned_account_id}, "
-            f"title={cleaned_title}, images={len(image_payloads)}, delivery_choice={delivery_choice}"
+            f"title={cleaned_title}, images={len(image_payloads)}, delivery_choice={delivery_choice}, "
+            f"multi_sku={bool(normalized_sku_config)}"
         )
 
         async with ItemPublisher(cookies_str, cleaned_account_id, proxy_config=proxy_config) as publisher:
@@ -10514,6 +10532,7 @@ async def _publish_product_to_account(
                 post_price=post_price_value,
                 can_self_pickup=bool(can_self_pickup),
                 category_hint=category_hint,
+                sku_config=normalized_sku_config,
             )
             latest_cookies_str = publisher.cookies_str
             published_item_id = publisher.extract_published_item_id(publish_result)
@@ -10636,6 +10655,7 @@ async def _run_product_batch_publish(batch_id: str, jobs: List[Dict[str, Any]], 
                 post_price=material.get('postage'),
                 can_self_pickup=bool(material.get('can_self_pickup')),
                 category_hint=material.get('category'),
+                sku_config=material.get('sku_config'),
                 material_id=material.get('id'),
                 batch_id=batch_id,
                 log_id=log_id,
@@ -10787,6 +10807,7 @@ async def publish_product_json(
         "category": request.category,
         "brand": request.brand,
         "condition": request.condition,
+        "sku_config": request.sku_config,
     }, partial=False)
     return await _publish_product_to_account(
         current_user=current_user,
@@ -10800,6 +10821,7 @@ async def publish_product_json(
         post_price=data.get('postage'),
         can_self_pickup=bool(data.get('can_self_pickup')),
         category_hint=data.get('category'),
+        sku_config=data.get('sku_config'),
     )
 
 
@@ -10829,6 +10851,13 @@ async def batch_publish_products(
     jobs: List[Dict[str, Any]] = []
     for material in materials:
         _validate_publish_images(material.get('images') or [])
+        try:
+            material['sku_config'] = normalize_sku_config(material.get('sku_config'))
+        except ProductSkuValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"商品素材 #{material.get('id')} 的多规格配置无效: {exc}",
+            ) from exc
         for account_id in account_ids:
             log_id = db_manager.add_publish_log(
                 current_user['user_id'],
@@ -11022,6 +11051,7 @@ async def publish_item(
     delivery_choice: str = Form(...),
     post_price: str = Form(default=""),
     can_self_pickup: str = Form(default="false"),
+    sku_config: str = Form(default=""),
     images: List[UploadFile] = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -11052,6 +11082,7 @@ async def publish_item(
         post_price=post_price,
         can_self_pickup=_parse_form_bool(can_self_pickup),
         category_hint=category,
+        sku_config=sku_config,
     )
 
 

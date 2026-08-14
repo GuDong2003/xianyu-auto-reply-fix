@@ -10,6 +10,7 @@ from PIL import Image
 from loguru import logger
 
 from utils.xianyu_utils import generate_sign, trans_cookies
+from utils.product_sku import build_sku_payload_fields, normalize_sku_config
 
 
 class ItemPublisher:
@@ -291,6 +292,7 @@ class ItemPublisher:
         post_price: Optional[float],
         can_self_pickup: bool,
         category_hint: Optional[str] = None,
+        sku_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if delivery_choice not in self.ALLOWED_DELIVERY_CHOICES:
             raise ValueError("不支持的运费方式")
@@ -298,9 +300,21 @@ class ItemPublisher:
         if delivery_choice == "一口价" and (post_price is None or post_price < 0):
             raise ValueError("运费方式为一口价时，邮费必须大于等于 0")
 
+        normalized_sku_config = normalize_sku_config(sku_config)
+        sku_capability = None
+        if normalized_sku_config:
+            sku_capability = await self.get_publish_capabilities()
+            if not self.is_success_response(sku_capability):
+                raise RuntimeError(f"获取账号多规格发布能力失败: {self.extract_error_message(sku_capability)}")
+            capability_data = sku_capability.get("data") if isinstance(sku_capability, dict) else None
+            if not isinstance(capability_data, dict) or capability_data.get("supportSkuOrInventory") is not True:
+                raise ValueError("当前闲鱼账号暂未开放网页端多规格或库存发布能力")
+
         uploaded_images = []
         for image in images:
             uploaded_images.append(await self.prepare_image_for_publish(image))
+
+        uploaded_sku_config = await self.prepare_sku_config_for_publish(normalized_sku_config)
 
         publish_title = str(title or "").strip()
         publish_desc = str(description or title or "").strip()
@@ -330,6 +344,7 @@ class ItemPublisher:
             post_price=post_price,
             can_self_pickup=can_self_pickup,
             category_result=category_result,
+            sku_config=uploaded_sku_config,
         )
 
         publish_res = await self._post_mtop(
@@ -342,7 +357,60 @@ class ItemPublisher:
 
         publish_res["_uploaded_images"] = uploaded_images
         publish_res["_category_debug"] = category_debug
+        publish_res["_multi_sku"] = bool(uploaded_sku_config)
+        if sku_capability is not None:
+            publish_res["_sku_capability"] = {
+                "supportSkuOrInventory": bool(
+                    isinstance(sku_capability.get("data"), dict)
+                    and sku_capability["data"].get("supportSkuOrInventory") is True
+                )
+            }
         return publish_res
+
+    async def get_publish_capabilities(self) -> Dict[str, Any]:
+        """获取当前账号的网页端发布能力，官方页面据此决定是否展示规格库存。"""
+        return await self._post_mtop(
+            api_name="mtop.idle.pc.idleitem.preget",
+            version="1.0",
+            payload={},
+            spm_cnt="a21ybx.publish.0.0",
+            spm_pre="a21ybx.home.sidebar.1.46413da6EPl7v5",
+        )
+
+    async def prepare_sku_config_for_publish(
+        self,
+        sku_config: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not sku_config:
+            return None
+
+        prepared_properties: List[Dict[str, Any]] = []
+        for sku_property in sku_config.get("properties") or []:
+            prepared_values: List[Dict[str, Any]] = []
+            for sku_value in sku_property.get("values") or []:
+                prepared_image = None
+                if sku_value.get("image"):
+                    prepared_image = await self.prepare_image_for_publish(sku_value["image"])
+                prepared_values.append(
+                    {
+                        "value": sku_value.get("value"),
+                        "image": prepared_image,
+                    }
+                )
+            prepared_properties.append(
+                {
+                    "name": sku_property.get("name"),
+                    "type": sku_property.get("type"),
+                    "support_image": bool(sku_property.get("support_image")),
+                    "values": prepared_values,
+                }
+            )
+
+        return {
+            "enabled": True,
+            "properties": prepared_properties,
+            "items": [dict(item) for item in sku_config.get("items") or []],
+        }
 
     async def prepare_image_for_publish(self, image: Dict[str, Any]) -> Dict[str, Any]:
         """将前端/素材中的图片描述统一转换为发布接口可用的图片信息。"""
@@ -512,6 +580,7 @@ class ItemPublisher:
         post_price: Optional[float],
         can_self_pickup: bool,
         category_result: Optional[Dict[str, Any]] = None,
+        sku_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         category_result = category_result or self._normalize_category_result(
             channel_res.get("data", {}).get("categoryPredictResult", {})
@@ -586,11 +655,14 @@ class ItemPublisher:
             post_price=post_price,
             can_self_pickup=can_self_pickup,
         )
-        self._apply_price_settings(
-            payload=payload,
-            current_price=current_price,
-            original_price=original_price,
-        )
+        if sku_config:
+            payload.update(build_sku_payload_fields(sku_config))
+        else:
+            self._apply_price_settings(
+                payload=payload,
+                current_price=current_price,
+                original_price=original_price,
+            )
 
         return payload
 

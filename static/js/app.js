@@ -45,6 +45,13 @@ let itemPublishLoadedMaterialId = null;
 let itemPublishLoadedMaterialImages = [];
 let itemPublishMaterials = [];
 let itemPublishLogs = [];
+const ITEM_PUBLISH_DEFAULT_SKU_TYPES = ['颜色', '尺码', '容量', '份数', '大小', '高度', '总量'];
+const ITEM_PUBLISH_MAX_SKU_PROPERTIES = 2;
+const ITEM_PUBLISH_MAX_SKU_COMBINATIONS = 1500;
+const ITEM_PUBLISH_MAX_SKU_QUANTITY = 9999;
+const ITEM_PUBLISH_MAX_SKU_PRICE = 99999999.99;
+const ITEM_PUBLISH_MAX_SKU_IMAGE_SIZE = 10 * 1024 * 1024;
+let itemPublishSkuState = { enabled: false, properties: [], items: [] };
 
 // 订单列表搜索和分页相关变量
 let allOrdersData = []; // 存储所有订单数据
@@ -11048,7 +11055,544 @@ function ensureItemPublishPageInitialized() {
         });
     }
 
+    renderItemPublishSkuEditor();
     itemPublishInitialized = true;
+}
+
+function createItemPublishSkuId(prefix) {
+    return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createItemPublishSkuValue(value = '', image = null) {
+    return {
+        id: createItemPublishSkuId('sku-value'),
+        value: String(value || ''),
+        image: image && typeof image === 'object' ? { ...image } : null
+    };
+}
+
+function createItemPublishSkuProperty(index = 0) {
+    return {
+        id: createItemPublishSkuId('sku-property'),
+        name: '',
+        type: 'default',
+        support_image: index === 0,
+        values: [createItemPublishSkuValue(), createItemPublishSkuValue()]
+    };
+}
+
+function resetItemPublishSkuState() {
+    itemPublishSkuState = { enabled: false, properties: [], items: [] };
+    const enabledInput = document.getElementById('publishSkuEnabled');
+    if (enabledInput) {
+        enabledInput.checked = false;
+    }
+    renderItemPublishSkuEditor();
+}
+
+function loadItemPublishSkuConfig(config) {
+    const enabled = Boolean(config && config.enabled);
+    const properties = enabled && Array.isArray(config.properties)
+        ? config.properties.slice(0, ITEM_PUBLISH_MAX_SKU_PROPERTIES).map((property, index) => ({
+            id: createItemPublishSkuId('sku-property'),
+            name: String(property?.name || '').trim(),
+            type: property?.type === 'custom' ? 'custom' : 'default',
+            support_image: Boolean(property?.support_image),
+            values: Array.isArray(property?.values)
+                ? property.values.map(value => createItemPublishSkuValue(value?.value, value?.image))
+                : []
+        }))
+        : [];
+    const items = enabled && Array.isArray(config.items)
+        ? config.items.map(item => ({
+            values: Array.isArray(item?.values) ? item.values.map(value => String(value || '').trim()) : [],
+            price: item?.price ?? '',
+            quantity: item?.quantity ?? 0
+        }))
+        : [];
+
+    itemPublishSkuState = { enabled, properties, items };
+    rebuildItemPublishSkuItems();
+    const enabledInput = document.getElementById('publishSkuEnabled');
+    if (enabledInput) {
+        enabledInput.checked = enabled;
+    }
+    renderItemPublishSkuEditor();
+}
+
+function handleItemPublishSkuToggle() {
+    const enabled = Boolean(document.getElementById('publishSkuEnabled')?.checked);
+    itemPublishSkuState.enabled = enabled;
+    if (enabled && itemPublishSkuState.properties.length === 0) {
+        itemPublishSkuState.properties.push(createItemPublishSkuProperty(0));
+    }
+    if (enabled) {
+        const currentPriceInput = document.getElementById('publishCurrentPrice');
+        const originalPriceInput = document.getElementById('publishOriginalPrice');
+        if (currentPriceInput) currentPriceInput.value = '';
+        if (originalPriceInput) originalPriceInput.value = '';
+    }
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function addItemPublishSkuProperty() {
+    if (itemPublishSkuState.properties.length >= ITEM_PUBLISH_MAX_SKU_PROPERTIES) {
+        showToast(`最多支持 ${ITEM_PUBLISH_MAX_SKU_PROPERTIES} 组商品规格`, 'warning');
+        return;
+    }
+    itemPublishSkuState.properties.push(createItemPublishSkuProperty(itemPublishSkuState.properties.length));
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function removeItemPublishSkuProperty(propertyIndex) {
+    if (!confirm('确认要删除这个规格吗？删除后不可恢复。')) {
+        return;
+    }
+    itemPublishSkuState.properties.splice(propertyIndex, 1);
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function moveItemPublishSkuProperty(propertyIndex, offset) {
+    const targetIndex = propertyIndex + offset;
+    if (targetIndex < 0 || targetIndex >= itemPublishSkuState.properties.length) {
+        return;
+    }
+    itemPublishSkuState.items.forEach(item => {
+        if (!Array.isArray(item.values)) return;
+        [item.values[propertyIndex], item.values[targetIndex]] = [item.values[targetIndex], item.values[propertyIndex]];
+    });
+    const [property] = itemPublishSkuState.properties.splice(propertyIndex, 1);
+    itemPublishSkuState.properties.splice(targetIndex, 0, property);
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function handleItemPublishSkuTypeChange(propertyIndex, selectedType) {
+    const property = itemPublishSkuState.properties[propertyIndex];
+    if (!property) return;
+    if (selectedType === '__custom__') {
+        property.type = 'custom';
+        if (ITEM_PUBLISH_DEFAULT_SKU_TYPES.includes(property.name)) {
+            property.name = '';
+        }
+    } else {
+        property.type = 'default';
+        property.name = selectedType;
+    }
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function updateItemPublishCustomSkuName(propertyIndex, value) {
+    const property = itemPublishSkuState.properties[propertyIndex];
+    if (!property) return;
+    property.type = 'custom';
+    property.name = String(value || '');
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuCombinationTable();
+}
+
+function toggleItemPublishSkuPropertyImage(propertyIndex, checked) {
+    const property = itemPublishSkuState.properties[propertyIndex];
+    if (!property) return;
+
+    if (checked) {
+        const otherIndex = itemPublishSkuState.properties.findIndex((item, index) => index !== propertyIndex && item.support_image);
+        if (otherIndex >= 0) {
+            const confirmed = confirm('仅支持 1 组规格添加图片。开启后，其他规格的图片会被清除，是否继续？');
+            if (!confirmed) {
+                renderItemPublishSkuEditor();
+                return;
+            }
+            const otherProperty = itemPublishSkuState.properties[otherIndex];
+            otherProperty.support_image = false;
+            otherProperty.values.forEach(value => { value.image = null; });
+        }
+        property.support_image = true;
+    } else {
+        property.support_image = false;
+        property.values.forEach(value => { value.image = null; });
+    }
+    renderItemPublishSkuEditor();
+}
+
+function addItemPublishSkuValue(propertyIndex) {
+    const property = itemPublishSkuState.properties[propertyIndex];
+    if (!property) return;
+    property.values.push(createItemPublishSkuValue());
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function removeItemPublishSkuValue(propertyIndex, valueIndex) {
+    const property = itemPublishSkuState.properties[propertyIndex];
+    if (!property) return;
+    if (!confirm('确认要删除这个规格值吗？')) {
+        return;
+    }
+    property.values.splice(valueIndex, 1);
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuEditor();
+}
+
+function updateItemPublishSkuValue(propertyIndex, valueIndex, value) {
+    const skuValue = itemPublishSkuState.properties[propertyIndex]?.values?.[valueIndex];
+    if (!skuValue) return;
+    skuValue.value = String(value || '');
+    rebuildItemPublishSkuItems();
+    renderItemPublishSkuCombinationTable();
+}
+
+async function handleItemPublishSkuImageChange(propertyIndex, valueIndex, input) {
+    const file = input?.files?.[0];
+    const skuValue = itemPublishSkuState.properties[propertyIndex]?.values?.[valueIndex];
+    if (!file || !skuValue) return;
+    if (file.type && !file.type.startsWith('image/')) {
+        showToast('规格图片必须是图片文件', 'warning');
+        input.value = '';
+        return;
+    }
+    if (file.size > ITEM_PUBLISH_MAX_SKU_IMAGE_SIZE) {
+        showToast('规格图片大小不能超过 10MB', 'warning');
+        input.value = '';
+        return;
+    }
+    try {
+        skuValue.image = {
+            filename: file.name || 'sku-image.jpg',
+            data: await fileToDataUrl(file),
+            size: file.size || 0,
+            type: file.type || 'image/jpeg'
+        };
+        renderItemPublishSkuEditor();
+    } catch (error) {
+        showToast(error.message || '读取规格图片失败', 'danger');
+    }
+}
+
+function removeItemPublishSkuImage(propertyIndex, valueIndex) {
+    const skuValue = itemPublishSkuState.properties[propertyIndex]?.values?.[valueIndex];
+    if (!skuValue) return;
+    skuValue.image = null;
+    renderItemPublishSkuEditor();
+}
+
+function getItemPublishSkuPropertyValues(property) {
+    return (property?.values || [])
+        .map(item => String(item?.value || '').trim())
+        .filter(Boolean);
+}
+
+function getItemPublishSkuCombinationCount() {
+    if (!itemPublishSkuState.properties.length) return 0;
+    return itemPublishSkuState.properties.reduce((count, property) => {
+        const valueCount = getItemPublishSkuPropertyValues(property).length;
+        return valueCount ? count * valueCount : 0;
+    }, 1);
+}
+
+function rebuildItemPublishSkuItems() {
+    const properties = itemPublishSkuState.properties;
+    if (!itemPublishSkuState.enabled || !properties.length) {
+        itemPublishSkuState.items = [];
+        return;
+    }
+
+    const propertyValues = properties.map(property => getItemPublishSkuPropertyValues(property));
+    const combinationCount = propertyValues.reduce((count, values) => count * values.length, 1);
+    if (propertyValues.some(values => values.length === 0) || combinationCount > ITEM_PUBLISH_MAX_SKU_COMBINATIONS) {
+        itemPublishSkuState.items = [];
+        return;
+    }
+
+    const oldItems = new Map(
+        (itemPublishSkuState.items || []).map(item => [JSON.stringify(item.values || []), item])
+    );
+    let combinations = [[]];
+    propertyValues.forEach(values => {
+        combinations = combinations.flatMap(combination => values.map(value => [...combination, value]));
+    });
+    itemPublishSkuState.items = combinations.map(values => {
+        const previous = oldItems.get(JSON.stringify(values));
+        return previous
+            ? { values, price: previous.price, quantity: previous.quantity }
+            : { values, price: '', quantity: 0 };
+    });
+}
+
+function updateItemPublishSkuItem(itemIndex, field, value) {
+    const item = itemPublishSkuState.items[itemIndex];
+    if (!item || !['price', 'quantity'].includes(field)) return;
+    item[field] = value;
+}
+
+function renderItemPublishSkuEditor() {
+    const editor = document.getElementById('publishSkuEditor');
+    const enabledInput = document.getElementById('publishSkuEnabled');
+    const propertyList = document.getElementById('publishSkuPropertyList');
+    const addButton = document.getElementById('publishSkuAddPropertyBtn');
+    const modeBadge = document.getElementById('publishSkuModeBadge');
+    const currentPriceWrap = document.getElementById('publishCurrentPriceWrap');
+    const originalPriceWrap = document.getElementById('publishOriginalPriceWrap');
+    if (!editor || !propertyList) return;
+
+    const enabled = Boolean(itemPublishSkuState.enabled);
+    if (enabledInput) enabledInput.checked = enabled;
+    editor.style.display = enabled ? '' : 'none';
+    if (currentPriceWrap) currentPriceWrap.style.display = enabled ? 'none' : '';
+    if (originalPriceWrap) originalPriceWrap.style.display = enabled ? 'none' : '';
+    if (modeBadge) {
+        modeBadge.className = enabled ? 'badge text-bg-primary' : 'badge text-bg-light border';
+        modeBadge.textContent = enabled ? '多规格商品' : '普通商品';
+    }
+
+    if (!enabled) {
+        propertyList.innerHTML = '';
+        const combinationWrap = document.getElementById('publishSkuCombinationWrap');
+        if (combinationWrap) combinationWrap.innerHTML = '';
+        return;
+    }
+
+    propertyList.innerHTML = itemPublishSkuState.properties.map((property, propertyIndex) => {
+        const selectedDefaults = new Set(
+            itemPublishSkuState.properties
+                .filter((item, index) => index !== propertyIndex && item.type === 'default')
+                .map(item => item.name)
+        );
+        const defaultOptions = ITEM_PUBLISH_DEFAULT_SKU_TYPES.map(type => `
+            <option value="${escapeHtml(type)}" ${property.type === 'default' && property.name === type ? 'selected' : ''} ${selectedDefaults.has(type) ? 'disabled' : ''}>${escapeHtml(type)}</option>
+        `).join('');
+        const valueRows = (property.values || []).map((skuValue, valueIndex) => {
+            const imageSrc = getItemPublishImageSrc(skuValue.image);
+            const imageControl = property.support_image ? `
+                <div class="item-publish-sku-value-image">
+                    ${imageSrc ? `<img src="${escapeHtml(imageSrc)}" alt="规格图">` : '<div class="item-publish-side-thumb is-empty" style="width:42px;height:42px;flex-basis:42px"><i class="bi bi-image"></i></div>'}
+                    <input type="file" class="form-control form-control-sm" accept="image/*" onchange="handleItemPublishSkuImageChange(${propertyIndex}, ${valueIndex}, this)">
+                    ${imageSrc ? `<button type="button" class="btn btn-sm btn-outline-secondary" onclick="removeItemPublishSkuImage(${propertyIndex}, ${valueIndex})">删除图</button>` : ''}
+                </div>
+            ` : '<div class="text-muted small">当前规格未开启图片</div>';
+            return `
+                <div class="item-publish-sku-value-row">
+                    <input
+                      type="text"
+                      class="form-control form-control-sm"
+                      maxlength="12"
+                      placeholder="输入规格值"
+                      value="${escapeHtml(skuValue.value || '')}"
+                      oninput="updateItemPublishSkuValue(${propertyIndex}, ${valueIndex}, this.value)"
+                    >
+                    ${imageControl}
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeItemPublishSkuValue(${propertyIndex}, ${valueIndex})">删除</button>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <div class="item-publish-sku-property">
+                <div class="item-publish-sku-property-header">
+                    <div>
+                        <label class="form-label small">规格类型</label>
+                        <select class="form-select form-select-sm" onchange="handleItemPublishSkuTypeChange(${propertyIndex}, this.value)">
+                            <option value="">请选择规格类型</option>
+                            ${defaultOptions}
+                            <option value="__custom__" ${property.type === 'custom' ? 'selected' : ''}>输入自定义类型</option>
+                        </select>
+                    </div>
+                    <div>
+                        ${property.type === 'custom' ? `
+                            <label class="form-label small">自定义名称</label>
+                            <input type="text" class="form-control form-control-sm" maxlength="4" placeholder="2～4 个字" value="${escapeHtml(property.name || '')}" oninput="updateItemPublishCustomSkuName(${propertyIndex}, this.value)">
+                        ` : `
+                            <label class="form-label small">规格图片</label>
+                            <div class="form-check form-switch pt-1">
+                                <input class="form-check-input" type="checkbox" ${property.support_image ? 'checked' : ''} onchange="toggleItemPublishSkuPropertyImage(${propertyIndex}, this.checked)">
+                                <span class="small">支持添加图片</span>
+                            </div>
+                        `}
+                    </div>
+                    <div class="d-flex flex-wrap gap-1 justify-content-end">
+                        ${property.type === 'custom' ? `
+                            <div class="form-check form-switch me-2">
+                                <input class="form-check-input" type="checkbox" ${property.support_image ? 'checked' : ''} onchange="toggleItemPublishSkuPropertyImage(${propertyIndex}, this.checked)">
+                                <span class="small">规格图</span>
+                            </div>
+                        ` : ''}
+                        <button type="button" class="btn btn-sm btn-outline-secondary" ${propertyIndex === 0 ? 'disabled' : ''} onclick="moveItemPublishSkuProperty(${propertyIndex}, -1)" title="上移"><i class="bi bi-arrow-up"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" ${propertyIndex === itemPublishSkuState.properties.length - 1 ? 'disabled' : ''} onclick="moveItemPublishSkuProperty(${propertyIndex}, 1)" title="下移"><i class="bi bi-arrow-down"></i></button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeItemPublishSkuProperty(${propertyIndex})">删除规格</button>
+                    </div>
+                </div>
+                <div class="item-publish-sku-value-list">${valueRows}</div>
+                <button type="button" class="btn btn-sm btn-outline-secondary mt-3" onclick="addItemPublishSkuValue(${propertyIndex})"><i class="bi bi-plus me-1"></i>添加规格值</button>
+            </div>
+        `;
+    }).join('');
+
+    if (addButton) {
+        addButton.disabled = itemPublishSkuState.properties.length >= ITEM_PUBLISH_MAX_SKU_PROPERTIES;
+        addButton.innerHTML = `<i class="bi bi-plus-circle me-1"></i>添加规格类型（${itemPublishSkuState.properties.length}/${ITEM_PUBLISH_MAX_SKU_PROPERTIES}）`;
+    }
+    renderItemPublishSkuCombinationTable();
+}
+
+function renderItemPublishSkuCombinationTable() {
+    const wrap = document.getElementById('publishSkuCombinationWrap');
+    if (!wrap || !itemPublishSkuState.enabled) return;
+    const count = getItemPublishSkuCombinationCount();
+    const propertiesReady = itemPublishSkuState.properties.length > 0
+        && itemPublishSkuState.properties.every(property => property.name.trim() && getItemPublishSkuPropertyValues(property).length > 0);
+
+    if (count > ITEM_PUBLISH_MAX_SKU_COMBINATIONS) {
+        wrap.innerHTML = `<div class="alert alert-danger mb-0">规格组合数量为 ${count}，超过 ${ITEM_PUBLISH_MAX_SKU_COMBINATIONS} 个上限，请精简规格值。</div>`;
+        return;
+    }
+    if (!propertiesReady || !itemPublishSkuState.items.length) {
+        wrap.innerHTML = '<div class="item-publish-preview-empty">设置规格类型和规格值后，将自动生成价格与库存表。</div>';
+        return;
+    }
+
+    const headers = itemPublishSkuState.properties.map(property => `<th>${escapeHtml(property.name || '规格')}</th>`).join('');
+    const rows = itemPublishSkuState.items.map((item, itemIndex) => `
+        <tr>
+            ${(item.values || []).map(value => `<td>${escapeHtml(value)}</td>`).join('')}
+            <td>
+                <div class="input-group input-group-sm">
+                    <span class="input-group-text">¥</span>
+                    <input type="number" class="form-control" min="0" max="${ITEM_PUBLISH_MAX_SKU_PRICE}" step="0.01" value="${escapeHtml(String(item.price ?? ''))}" placeholder="0.00" oninput="updateItemPublishSkuItem(${itemIndex}, 'price', this.value)">
+                </div>
+            </td>
+            <td><input type="number" class="form-control form-control-sm" min="0" max="${ITEM_PUBLISH_MAX_SKU_QUANTITY}" step="1" value="${escapeHtml(String(item.quantity ?? 0))}" oninput="updateItemPublishSkuItem(${itemIndex}, 'quantity', this.value)"></td>
+        </tr>
+    `).join('');
+    wrap.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div class="fw-semibold">规格价格与库存</div>
+            <div class="item-publish-sku-count">共 ${count} 个组合</div>
+        </div>
+        <div class="item-publish-sku-table-wrap">
+            <table class="table table-sm align-middle item-publish-sku-table">
+                <thead><tr>${headers}<th>价格</th><th>库存</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function itemPublishContainsEmoji(value) {
+    return /[\u{1F1E0}-\u{1FAFF}\u2600-\u27BF\u200D\uFE0F]/u.test(String(value || ''));
+}
+
+function buildItemPublishSkuConfig() {
+    if (!itemPublishSkuState.enabled) {
+        return null;
+    }
+    rebuildItemPublishSkuItems();
+    const properties = itemPublishSkuState.properties;
+    if (!properties.length) {
+        throw new Error('请至少设置 1 组商品规格');
+    }
+    if (properties.length > ITEM_PUBLISH_MAX_SKU_PROPERTIES) {
+        throw new Error(`最多支持 ${ITEM_PUBLISH_MAX_SKU_PROPERTIES} 组商品规格`);
+    }
+
+    const names = new Set();
+    let imagePropertyCount = 0;
+    const normalizedProperties = properties.map((property, propertyIndex) => {
+        const name = String(property.name || '').trim();
+        if (property.type === 'default') {
+            if (!ITEM_PUBLISH_DEFAULT_SKU_TYPES.includes(name)) {
+                throw new Error(`第 ${propertyIndex + 1} 组请选择默认规格类型`);
+            }
+        } else {
+            const nameLength = Array.from(name).length;
+            if (ITEM_PUBLISH_DEFAULT_SKU_TYPES.includes(name)) {
+                throw new Error(`${name} 属于默认规格类型，请从默认列表选择`);
+            }
+            if (nameLength < 2 || nameLength > 4) {
+                throw new Error('自定义规格名称必须为 2～4 个字');
+            }
+            if (itemPublishContainsEmoji(name)) {
+                throw new Error('规格名称不能包含 Emoji');
+            }
+        }
+        if (names.has(name)) {
+            throw new Error(`规格类型 ${name} 已存在`);
+        }
+        names.add(name);
+
+        if (property.support_image) {
+            imagePropertyCount += 1;
+            if (imagePropertyCount > 1) {
+                throw new Error('仅支持 1 组规格添加图片');
+            }
+        }
+
+        const valueNames = new Set();
+        const values = (property.values || []).map(value => ({
+            value: String(value?.value || '').trim(),
+            image: value?.image || null
+        })).filter(value => value.value);
+        if (values.length < 2) {
+            throw new Error(`规格 ${name} 最少需要 2 个规格值`);
+        }
+        values.forEach(value => {
+            if (Array.from(value.value).length > 12) {
+                throw new Error(`规格 ${name} 的规格值最大长度为 12 个字`);
+            }
+            if (itemPublishContainsEmoji(value.value)) {
+                throw new Error(`规格 ${name} 的规格值不能包含 Emoji`);
+            }
+            if (valueNames.has(value.value)) {
+                throw new Error(`规格 ${name} 的规格值 ${value.value} 重复`);
+            }
+            valueNames.add(value.value);
+            if (value.image && !property.support_image) {
+                throw new Error(`规格 ${name} 未开启规格图片`);
+            }
+        });
+        return {
+            name,
+            type: property.type === 'custom' ? 'custom' : 'default',
+            support_image: Boolean(property.support_image),
+            values
+        };
+    });
+
+    const combinationCount = getItemPublishSkuCombinationCount();
+    if (combinationCount > ITEM_PUBLISH_MAX_SKU_COMBINATIONS) {
+        throw new Error(`规格组合数量超过 ${ITEM_PUBLISH_MAX_SKU_COMBINATIONS} 个，请精简规格值`);
+    }
+    if (itemPublishSkuState.items.length !== combinationCount) {
+        throw new Error('规格组合尚未完整生成，请检查规格值');
+    }
+
+    let hasAvailableStock = false;
+    const items = itemPublishSkuState.items.map(item => {
+        const priceText = String(item.price ?? '').trim();
+        const quantityText = String(item.quantity ?? '').trim();
+        const price = Number(priceText);
+        const quantity = Number(quantityText);
+        const combinationLabel = (item.values || []).join(' / ');
+        if (!priceText || !Number.isFinite(price) || price < 0 || price > ITEM_PUBLISH_MAX_SKU_PRICE) {
+            throw new Error(`规格组合 ${combinationLabel} 的价格必须在 0 到 ${ITEM_PUBLISH_MAX_SKU_PRICE} 元之间`);
+        }
+        if (!/^\d+(?:\.\d{1,2})?$/.test(priceText)) {
+            throw new Error(`规格组合 ${combinationLabel} 的价格最多保留 2 位小数`);
+        }
+        if (!quantityText || !Number.isInteger(quantity) || quantity < 0 || quantity > ITEM_PUBLISH_MAX_SKU_QUANTITY) {
+            throw new Error(`规格组合 ${combinationLabel} 的库存必须在 0 到 ${ITEM_PUBLISH_MAX_SKU_QUANTITY} 之间`);
+        }
+        if (quantity > 0) hasAvailableStock = true;
+        return { values: [...item.values], price, quantity };
+    });
+    if (!hasAvailableStock) {
+        throw new Error('至少需有一个商品库存大于 0');
+    }
+
+    return { enabled: true, properties: normalizedProperties, items };
 }
 
 async function loadItemPublishAccounts() {
@@ -11209,6 +11753,7 @@ function clearItemPublishForm(clearResult = true) {
     clearItemPublishImagePreviews();
     itemPublishLoadedMaterialId = null;
     itemPublishLoadedMaterialImages = [];
+    resetItemPublishSkuState();
     updateItemPublishMaterialModeBadge();
     handlePublishDeliveryChoiceChange();
 
@@ -11345,6 +11890,7 @@ function getItemPublishFormValues() {
         deliveryChoice: document.getElementById('publishDeliveryChoice')?.value || '包邮',
         postPrice: document.getElementById('publishPostPrice')?.value.trim() || '',
         canSelfPickup: document.getElementById('publishCanSelfPickup')?.checked || false,
+        skuConfig: null,
         files: Array.from(document.getElementById('publishImages')?.files || [])
     };
 }
@@ -11362,7 +11908,8 @@ function validateItemPublishValues(values, { requireAccount = true, requireImage
     if (values.files.length > 9) {
         throw new Error('单次最多上传 9 张图片');
     }
-    if (values.originalPrice && !values.currentPrice) {
+    values.skuConfig = buildItemPublishSkuConfig();
+    if (values.originalPrice && !values.currentPrice && !values.skuConfig) {
         throw new Error('填写原价时必须同时填写现价');
     }
     if (values.deliveryChoice === '一口价' && !values.postPrice) {
@@ -11404,18 +11951,20 @@ async function convertPublishFilesToImages(files) {
 }
 
 function buildItemPublishJsonPayload(values, images) {
+    const isMultiSku = Boolean(values.skuConfig?.enabled);
     return {
         account_id: values.accountId,
         title: values.title,
         description: values.description,
         category: values.category,
-        price: parseOptionalPublishNumber(values.currentPrice, '现价'),
-        original_price: parseOptionalPublishNumber(values.originalPrice, '原价'),
+        price: isMultiSku ? null : parseOptionalPublishNumber(values.currentPrice, '现价'),
+        original_price: isMultiSku ? null : parseOptionalPublishNumber(values.originalPrice, '原价'),
         images,
         delivery_method: values.deliveryChoice,
         postage: parseOptionalPublishNumber(values.postPrice, '邮费'),
         can_self_pickup: values.canSelfPickup,
-        condition: '全新'
+        condition: '全新',
+        sku_config: values.skuConfig
     };
 }
 
@@ -11526,6 +12075,7 @@ async function saveItemPublishMaterial() {
         const material = result.material || {};
         itemPublishLoadedMaterialId = material.id || itemPublishLoadedMaterialId;
         itemPublishLoadedMaterialImages = Array.isArray(material.images) ? material.images : images;
+        loadItemPublishSkuConfig(material.sku_config || values.skuConfig);
         const imageInput = document.getElementById('publishImages');
         if (imageInput) {
             imageInput.value = '';
@@ -11575,7 +12125,13 @@ function renderItemPublishMaterials() {
     container.innerHTML = itemPublishMaterials.map(material => {
         const image = Array.isArray(material.images) && material.images.length ? material.images[0] : null;
         const imageSrc = getItemPublishImageSrc(image);
-        const priceText = material.price !== null && material.price !== undefined ? `¥${material.price}` : '默认价';
+        const skuItems = material.sku_config?.enabled && Array.isArray(material.sku_config.items)
+            ? material.sku_config.items
+            : [];
+        const skuPrices = skuItems.map(item => Number(item.price)).filter(price => Number.isFinite(price));
+        const priceText = skuPrices.length
+            ? `多规格 ¥${Math.min(...skuPrices)}${Math.min(...skuPrices) === Math.max(...skuPrices) ? '' : `～${Math.max(...skuPrices)}`}`
+            : (material.price !== null && material.price !== undefined ? `¥${material.price}` : '默认价');
         const categoryText = material.category ? ` · ${material.category}` : '';
         const imageCount = Array.isArray(material.images) ? material.images.length : 0;
         return `
@@ -11616,6 +12172,7 @@ function loadItemPublishMaterialToForm(materialId) {
 
     itemPublishLoadedMaterialId = material.id;
     itemPublishLoadedMaterialImages = Array.isArray(material.images) ? material.images : [];
+    loadItemPublishSkuConfig(material.sku_config);
     handlePublishDeliveryChoiceChange();
     renderItemPublishStoredImagePreviews(itemPublishLoadedMaterialImages);
     updateItemPublishMaterialModeBadge();
@@ -11731,6 +12288,7 @@ async function submitItemPublishForm() {
             formData.append('delivery_choice', values.deliveryChoice);
             formData.append('post_price', values.postPrice);
             formData.append('can_self_pickup', values.canSelfPickup ? 'true' : 'false');
+            formData.append('sku_config', values.skuConfig ? JSON.stringify(values.skuConfig) : '');
             values.files.forEach(file => formData.append('images', file));
 
             const response = await fetch(`${apiBase}/item-publish`, {

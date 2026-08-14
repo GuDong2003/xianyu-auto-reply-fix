@@ -21,13 +21,15 @@
 
 1. 修改代码或新增需要热更新的文件。
 2. 更新 `static/version.txt` 为新的版本号。
-3. 执行发布前检查：
+3. 在 `static/update_log.txt` 顶部追加新版本更新内容；首行使用
+   `发布 vX.Y.Z（YYYY-MM-DD）：更新摘要` 格式，主页会自动读取版本、日期和后续编号条目。
+4. 执行发布前检查：
 
    ```bash
    python3 release_precheck.py
    ```
 
-4. 提交并 `push` 到 `main`。
-5. 等待 Action 自动生成 Release 和 `update_files.json`。
+5. 提交并 `push` 到 `main`。
+6. 等待 Action 自动生成 Release 和 `update_files.json`。
 
 热更新在覆盖和新增文件之外，还支持通过 manifest 的 `deleted_files` 清理旧文件。删除前会先备份原文件，再执行清理。

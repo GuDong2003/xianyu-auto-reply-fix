@@ -38,6 +38,7 @@ from utils.notification_dispatcher import (
     guess_verification_type,
     render_notification_template,
 )
+from utils.item_pagination import normalize_item_list_page_size
 
 
 MANUAL_VERIFICATION_CONTEXTS = {
@@ -17779,6 +17780,11 @@ class XianyuLive:
             logger.error("获取商品信息失败，重试次数过多")
             return {"error": "获取商品信息失败，重试次数过多"}
 
+        requested_page_size = page_size
+        page_size = normalize_item_list_page_size(page_size)
+        if str(requested_page_size) != str(page_size):
+            logger.warning(f"商品列表每页数量已限制为 {page_size}: requested={requested_page_size}")
+
         # 确保session已创建
         if not self.session:
             await self.create_session()
@@ -17945,6 +17951,7 @@ class XianyuLive:
         Returns:
             dict: 包含所有商品信息的字典
         """
+        page_size = normalize_item_list_page_size(page_size)
         all_items = []
         page_number = 1
         total_saved = 0

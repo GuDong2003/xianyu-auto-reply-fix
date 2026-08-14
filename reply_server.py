@@ -35,6 +35,7 @@ from utils.qr_login import qr_login_manager
 from utils.qr_login_lite import qrcode_login_lite
 from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
+from utils.item_pagination import MAX_ITEM_LIST_PAGE_SIZE
 from utils.product_sku import ProductSkuValidationError, normalize_sku_config
 from utils.time_utils import (
     LOCAL_TIMEZONE,
@@ -10261,7 +10262,7 @@ async def _sync_items_after_publish(
     try:
         page_sync_result = await xianyu_instance.get_item_list_info(
             page_number=1,
-            page_size=100,
+            page_size=MAX_ITEM_LIST_PAGE_SIZE,
             sync_item_details=True,
         )
 
@@ -10270,7 +10271,7 @@ async def _sync_items_after_publish(
 
         if published_item_id and not item_synced:
             fallback_result = await xianyu_instance.get_all_items(
-                page_size=100,
+                page_size=MAX_ITEM_LIST_PAGE_SIZE,
                 max_pages=3,
                 sync_item_details=True,
             )

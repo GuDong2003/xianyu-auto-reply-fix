@@ -27,6 +27,7 @@
 ### 浏览器画像与滑块恢复说明
 
 - `token_refresh` 命中滑块时，程序会优先复用 `browser_data/user_<账号ID>` 下的账号级浏览器画像和站点状态。
+- 自动滑块反复失败时，可设置 `XY_ENABLE_AUTO_SLIDER=0` 启用人工接管；浏览器会保持可见，并在人工验证成功时立即保存 Cookie。等待时长可通过 `XY_MANUAL_SLIDER_TIMEOUT` 调整。
 - 各账号各用各的 `browser_data/user_<账号ID>` 目录，不共享浏览器状态。
 - 同账号如果同时撞上滑块，会按现有并发保护排队，不会自己跟自己抢 profile。
 - 这套账号级 persistent profile 优先策略目前只挂在 `token_refresh` 的滑块恢复链上，不会把正常消息监听、订单处理、手动导入 Cookie 主链一锅端改掉。

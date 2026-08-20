@@ -31,7 +31,13 @@ USE_XVFB=true
 ENABLE_HEADFUL=true
 ENABLE_VNC=false
 DISPLAY=:99
+
+# 滑块人工接管（可选；默认仍启用自动滑块）
+XY_ENABLE_AUTO_SLIDER=0
+XY_MANUAL_SLIDER_TIMEOUT=180
 ```
+
+`XY_ENABLE_AUTO_SLIDER` 未设置时保持原有自动滑块行为。将它设置为 `0`、`false`、`no` 或 `off` 后，程序会改用有头浏览器等待人工完成验证。`XY_MANUAL_SLIDER_TIMEOUT` 用于设置等待秒数，默认 `180`，最小 `30`。
 
 ## 全局配置文件
 

@@ -16111,6 +16111,38 @@ class XianyuLive:
                             reply = await self.get_ai_reply(send_user_name, send_user_id, send_message, item_id, chat_id)
                             if reply:
                                 reply_source = 'AI'
+                                ai_filter_result = await self._apply_message_filters(
+                                    send_user_name=send_user_name,
+                                    send_user_id=send_user_id,
+                                    send_message=str(reply),
+                                    item_id=item_id,
+                                    chat_id=chat_id,
+                                    msg_time=msg_time,
+                                    message_source='ai',
+                                    execute_actions=True,
+                                )
+                                if ai_filter_result.get('matched'):
+                                    matched_names = '、'.join([
+                                        str(rule.get('name') or rule.get('id') or '').strip()
+                                        for rule in (ai_filter_result.get('rules') or [])
+                                        if str(rule.get('name') or rule.get('id') or '').strip()
+                                    ]) or '消息过滤规则'
+                                    should_block_ai = bool(
+                                        ai_filter_result.get('skip_auto_reply')
+                                        or ai_filter_result.get('skip_ai_reply')
+                                    )
+                                    if should_block_ai:
+                                        logger.warning(
+                                            f"[{msg_time}] 【{self.cookie_id}】AI回复发送前命中{matched_names}，"
+                                            f"已执行规则动作并取消发送: {str(reply)[:100]}"
+                                        )
+                                        reply = None
+                                        reply_source = None
+                                    else:
+                                        logger.info(
+                                            f"[{msg_time}] 【{self.cookie_id}】AI回复发送前命中{matched_names}，"
+                                            "已执行规则动作，AI回复继续发送"
+                                        )
 
             # 注意：这里只有商品ID，没有标题和详情，根据新的规则不保存到数据库
             # 商品信息会在其他有完整信息的地方保存（如发货规则匹配时）

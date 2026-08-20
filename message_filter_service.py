@@ -11,7 +11,7 @@ from db_manager import db_manager
 
 class MessageFilterService:
     VALID_MATCH_TYPES = {'contains', 'exact', 'regex'}
-    VALID_MESSAGE_SOURCES = {'all', 'user', 'system'}
+    VALID_MESSAGE_SOURCES = {'all', 'user', 'system', 'ai'}
 
     def __init__(self, db=db_manager):
         self.db = db

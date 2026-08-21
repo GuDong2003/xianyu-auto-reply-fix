@@ -978,6 +978,9 @@ class XianyuSliderStealth:
                  account_persistent_profile_dir: Optional[str] = None):
         self.user_id = user_id
         self.enable_learning = enable_learning
+        # 人工验证成功时的临时 Cookie 快照仅属于当前一次验证。
+        # 每个实例从空状态开始，避免跨账号或跨重试复用旧快照。
+        self._manual_success_cookies = None
         auto_slider_value = os.environ.get("XY_ENABLE_AUTO_SLIDER", "").strip().lower()
         # 保持旧版默认行为；只有显式关闭时才进入人工接管模式。
         self.auto_slider_enabled = auto_slider_value not in {"0", "false", "no", "off"}
@@ -3408,15 +3411,6 @@ class XianyuSliderStealth:
         try:
             logger.info(f"【{self.pure_user_id}】开始获取滑块验证成功后的页面cookie...")
 
-            # 人工验证成功时已即时快照，优先使用，避免用户随后关闭页面导致
-            # Page.title/context.cookies 均不可访问，进而把成功误判为失败。
-            manual_cookies = getattr(self, '_manual_success_cookies', None)
-            if manual_cookies:
-                logger.info(
-                    f"【{self.pure_user_id}】使用人工验证成功时即时保存的cookie，共{len(manual_cookies)}个"
-                )
-                return manual_cookies
-
             # 检查当前页面URL
             current_url = self.page.url
             logger.info(f"【{self.pure_user_id}】当前页面URL: {current_url}")
@@ -3487,6 +3481,17 @@ class XianyuSliderStealth:
                 return None
                 
         except Exception as e:
+            # 正常情况下必须走 goofish 主域回访、域优先筛选和 token 稳定化。
+            # 只有用户在人工验证成功后关闭了页面、正常收口无法继续时，才使用
+            # 成功瞬间保存的 goofish 域快照作为兜底。
+            manual_cookies = getattr(self, '_manual_success_cookies', None)
+            if manual_cookies:
+                self._manual_success_cookies = None
+                logger.warning(
+                    f"【{self.pure_user_id}】页面已不可访问，使用人工验证成功时的"
+                    f"goofish Cookie 快照兜底，共{len(manual_cookies)}个"
+                )
+                return manual_cookies
             logger.error(f"【{self.pure_user_id}】获取滑块验证成功后的cookie失败: {str(e)}")
             return None
     
@@ -9427,6 +9432,8 @@ class XianyuSliderStealth:
         """
         # 部分旧调用/测试会绕过 __init__ 构造实例；这种情况下保持旧行为。
         if not getattr(self, 'auto_slider_enabled', True):
+            # 每次人工验证都是独立会话，禁止复用上一次成功留下的快照。
+            self._manual_success_cookies = None
             logger.warning(
                 f"【{self.pure_user_id}】自动滑块已关闭，浏览器将保留"
                 f"{getattr(self, 'manual_slider_timeout', 180)}秒，请手动完成滑块验证"
@@ -9443,6 +9450,7 @@ class XianyuSliderStealth:
                         self._manual_success_cookies = self._snapshot_context_cookies(
                             self.context,
                             page=self.page,
+                            preferred_domain_suffixes=('goofish.com',),
                         )
                         logger.success(f"【{self.pure_user_id}】人工滑块验证成功")
                         return True
@@ -9452,6 +9460,7 @@ class XianyuSliderStealth:
                     )
                 time.sleep(1)
             logger.warning(f"【{self.pure_user_id}】等待人工滑块验证超时或窗口已关闭")
+            self._manual_success_cookies = None
             return False
 
         original_max_retries = max_retries
@@ -12523,6 +12532,7 @@ class XianyuSliderStealth:
         # 每次 run() 进入都先清空内层自救兜底标记，避免上次状态残留
         self._post_recovery_success = False
         self._post_recovery_cookies = None
+        self._manual_success_cookies = None
         try:
             # 检查日期有效性
             if not self._check_date_validity():
@@ -12576,7 +12586,7 @@ class XianyuSliderStealth:
                     and getattr(self, 'risk_trigger_scene', '') == 'token_refresh'
                 )
 
-                if not manual_headful and self._is_hard_block_page(self.page):
+                if self._is_hard_block_page(self.page):
                     self.last_verification_feedback = {
                         "status": "hard_block",
                         "source": "deny_page",
@@ -12607,11 +12617,32 @@ class XianyuSliderStealth:
                 # 自动轨迹一旦失败会立即关闭窗口并进入退避，导致界面虽显示
                 # “可接管”却没有实际可接管的浏览器。
                 if manual_headful:
+                    # 仅在确认当前页面存在可操作滑块时进入人工等待；处罚页、
+                    # 二维码页和其它无滑块页面继续走原有识别/处理分支。
+                    self._manual_success_cookies = None
+                    _, slider_button, _ = self.find_slider_elements(fast_mode=True)
+                    if slider_button is None:
+                        monitor_page = self._select_monitor_page(self.context, self.page) or self.page
+                        has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
+                        if has_qr:
+                            verification_result = self._process_verification_requirement(
+                                self.context,
+                                monitor_page,
+                                qr_frame,
+                                notification_callback=notification_callback,
+                                notification_scene=notification_scene,
+                            )
+                            if verification_result:
+                                return True, verification_result
+                        logger.warning(
+                            f"【{self.pure_user_id}】人工接管模式未找到可操作滑块，"
+                            "不进入无意义的超时等待"
+                        )
+                        return False, None
                     logger.warning(
                         f"【{self.pure_user_id}】已进入人工滑块模式，浏览器将保留"
                         f"{getattr(self, 'manual_slider_timeout', 180)}秒，请在窗口中手动完成验证"
                     )
-                    _, slider_button, _ = self.find_slider_elements(fast_mode=True)
                     success = False
                     deadline = time.time() + getattr(self, 'manual_slider_timeout', 180)
                     while time.time() < deadline:
@@ -12625,6 +12656,7 @@ class XianyuSliderStealth:
                                 self._manual_success_cookies = self._snapshot_context_cookies(
                                     self.context,
                                     page=self.page,
+                                    preferred_domain_suffixes=('goofish.com',),
                                 )
                                 logger.info(f"【{self.pure_user_id}】已即时保存人工验证成功Cookie")
                                 logger.success(f"【{self.pure_user_id}】人工滑块验证成功")
@@ -12635,6 +12667,7 @@ class XianyuSliderStealth:
                             )
                         time.sleep(1)
                     if not success:
+                        self._manual_success_cookies = None
                         logger.warning(f"【{self.pure_user_id}】等待人工滑块验证超时或窗口已关闭")
                 else:
                     # 无头模式继续使用自动滑块

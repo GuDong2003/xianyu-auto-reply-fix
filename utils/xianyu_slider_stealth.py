@@ -981,6 +981,7 @@ class XianyuSliderStealth:
         # 人工验证成功时的临时 Cookie 快照仅属于当前一次验证。
         # 每个实例从空状态开始，避免跨账号或跨重试复用旧快照。
         self._manual_success_cookies = None
+        self.expected_outbound_ip = None
         auto_slider_value = os.environ.get("XY_ENABLE_AUTO_SLIDER", "").strip().lower()
         # 保持旧版默认行为；只有显式关闭时才进入人工接管模式。
         self.auto_slider_enabled = auto_slider_value not in {"0", "false", "no", "off"}
@@ -2680,6 +2681,93 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.debug(f"【{self.pure_user_id}】统计近期滑块失败压力失败: {e}")
             return False
+
+    def _evaluate_slider_preflight_risk(self) -> Tuple[bool, str]:
+        """验证前门控：近期硬拒绝或连续失败时先冷却，避免继续加重风控。"""
+        if getattr(self, 'risk_trigger_scene', '') != 'token_refresh':
+            return True, ''
+
+        try:
+            if not os.path.exists(self.failure_history_file):
+                return True, ''
+            with open(self.failure_history_file, 'r', encoding='utf-8') as f:
+                failures = json.load(f)
+            if not isinstance(failures, list):
+                return True, ''
+
+            now = time.time()
+            window_seconds = max(300, int(os.environ.get('XY_SLIDER_RISK_WINDOW', '1800') or 1800))
+            recent = []
+            hard_rejects = []
+            for record in failures:
+                if not isinstance(record, dict):
+                    continue
+                ts = record.get('timestamp')
+                if not isinstance(ts, (int, float)) or now - float(ts) > window_seconds:
+                    continue
+                scene = self._normalize_learning_scene(
+                    record.get('trigger_scene') or record.get('risk_trigger_scene')
+                )
+                if scene not in {'generic', 'token_refresh'}:
+                    continue
+                recent.append(record)
+                feedback = record.get('verification_feedback') or {}
+                fail_code = str(feedback.get('fail_code') or '').strip().lower()
+                message = ' '.join([
+                    str(feedback.get('message') or ''),
+                    str(feedback.get('dom_error_text') or ''),
+                ]).lower()
+                if fail_code or ('验证失败，点击框体重试' in message and 'error:' in message):
+                    hard_rejects.append(record)
+
+            if hard_rejects:
+                return False, f'近{window_seconds // 60}分钟命中过硬拒绝，等待风控冷却后再验证'
+
+            threshold = max(3, int(os.environ.get('XY_SLIDER_RISK_FAILURE_THRESHOLD', '6') or 6))
+            if len(recent) >= threshold:
+                recent_successes = 0
+                for record in self._load_success_history():
+                    if not isinstance(record, dict) or not record.get('success'):
+                        continue
+                    ts = record.get('timestamp')
+                    if isinstance(ts, (int, float)) and now - float(ts) <= window_seconds:
+                        recent_successes += 1
+                if recent_successes == 0:
+                    return False, (
+                        f'近{window_seconds // 60}分钟滑块失败{len(recent)}次且无成功记录，'
+                        '等待风险下降后再验证'
+                    )
+        except Exception as preflight_error:
+            logger.debug(f"【{self.pure_user_id}】验证前风险门控检查失败，按兼容模式继续: {preflight_error}")
+        return True, ''
+
+    def _check_browser_outbound_ip_consistency(self) -> Tuple[bool, str]:
+        """比较 Token HTTP 链路和浏览器链路出口 IP；探测失败时兼容放行。"""
+        expected_ip = str(getattr(self, 'expected_outbound_ip', '') or '').strip()
+        if not expected_ip:
+            return True, ''
+        probe_url = os.environ.get(
+            'XY_OUTBOUND_IP_PROBE_URL',
+            'https://api.ipify.org?format=json',
+        ).strip()
+        if not probe_url:
+            return True, ''
+        try:
+            request_context = getattr(self.context, 'request', None)
+            if request_context is None:
+                return True, ''
+            response = request_context.get(probe_url, timeout=5000)
+            if not getattr(response, 'ok', False):
+                return True, ''
+            payload = response.json() or {}
+            browser_ip = str(payload.get('ip') or '').strip()
+            if browser_ip and browser_ip != expected_ip:
+                return False, 'Token 请求与验证浏览器出口 IP 不一致，暂不启动滑块'
+            if browser_ip:
+                logger.info(f"【{self.pure_user_id}】验证前出口 IP 一致性检查通过")
+        except Exception as probe_error:
+            logger.debug(f"【{self.pure_user_id}】浏览器出口 IP 探测失败，按兼容模式继续: {probe_error}")
+        return True, ''
 
     def _normalize_learning_scene(self, trigger_scene: Optional[str] = None) -> str:
         scene = str(trigger_scene or getattr(self, "risk_trigger_scene", None) or "").strip().lower()
@@ -12534,6 +12622,16 @@ class XianyuSliderStealth:
         self._post_recovery_cookies = None
         self._manual_success_cookies = None
         try:
+            preflight_allowed, preflight_reason = self._evaluate_slider_preflight_risk()
+            if not preflight_allowed:
+                self.last_verification_feedback = {
+                    'status': 'preflight_deferred',
+                    'source': 'recent_risk_pressure',
+                    'message': preflight_reason,
+                }
+                logger.warning(f"【{self.pure_user_id}】验证前风险门控已延迟滑块: {preflight_reason}")
+                return False, None
+
             # 检查日期有效性
             if not self._check_date_validity():
                 logger.error(f"【{self.pure_user_id}】日期验证失败，无法执行")
@@ -12541,6 +12639,16 @@ class XianyuSliderStealth:
             
             # 初始化浏览器
             self.init_browser()
+
+            ip_allowed, ip_reason = self._check_browser_outbound_ip_consistency()
+            if not ip_allowed:
+                self.last_verification_feedback = {
+                    'status': 'preflight_deferred',
+                    'source': 'outbound_ip_mismatch',
+                    'message': ip_reason,
+                }
+                logger.warning(f"【{self.pure_user_id}】验证前风险门控已延迟滑块: {ip_reason}")
+                return False, None
 
             # 无头模式默认跳过额外预热，避免先访问其它页面把风控状态搞得更脏；
             # 如需回滚，可设置 XY_SLIDER_HEADLESS_WARMUP=1。

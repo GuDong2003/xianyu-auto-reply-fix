@@ -1,10 +1,68 @@
 import unittest
-from unittest.mock import MagicMock, PropertyMock, patch
+import json
+import time
+from unittest.mock import MagicMock, PropertyMock, mock_open, patch
 
 from utils.xianyu_slider_stealth import XianyuSliderStealth
 
 
 class ManualSliderFallbackTest(unittest.TestCase):
+    def test_preflight_defers_recent_hard_reject(self):
+        slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
+        slider.pure_user_id = "account-1"
+        slider.risk_trigger_scene = "token_refresh"
+        slider.failure_history_file = "failures.json"
+        slider.success_history_file = "success.json"
+        records = [{
+            "timestamp": time.time(),
+            "risk_trigger_scene": "token_refresh",
+            "verification_feedback": {
+                "status": "failure",
+                "fail_code": "8s0tm",
+                "message": "验证失败，点击框体重试",
+            },
+        }]
+        with patch("utils.xianyu_slider_stealth.os.path.exists", return_value=True), patch(
+            "builtins.open", mock_open(read_data=json.dumps(records))
+        ):
+            allowed, reason = slider._evaluate_slider_preflight_risk()
+
+        self.assertFalse(allowed)
+        self.assertIn("硬拒绝", reason)
+
+    def test_preflight_defers_repeated_failures_without_success(self):
+        slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
+        slider.pure_user_id = "account-1"
+        slider.risk_trigger_scene = "token_refresh"
+        slider.failure_history_file = "failures.json"
+        slider.success_history_file = "success.json"
+        failures = [{
+            "timestamp": time.time(),
+            "risk_trigger_scene": "token_refresh",
+            "verification_feedback": {"status": "failure"},
+        } for _ in range(6)]
+        with patch("utils.xianyu_slider_stealth.os.path.exists", return_value=True), patch(
+            "builtins.open", mock_open(read_data=json.dumps(failures))
+        ):
+            allowed, reason = slider._evaluate_slider_preflight_risk()
+
+        self.assertFalse(allowed)
+        self.assertIn("失败6次", reason)
+
+    def test_preflight_defers_when_browser_uses_different_outbound_ip(self):
+        slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
+        slider.pure_user_id = "account-1"
+        slider.expected_outbound_ip = "203.0.113.10"
+        response = MagicMock(ok=True)
+        response.json.return_value = {"ip": "198.51.100.20"}
+        slider.context = MagicMock()
+        slider.context.request.get.return_value = response
+
+        allowed, reason = slider._check_browser_outbound_ip_consistency()
+
+        self.assertFalse(allowed)
+        self.assertIn("出口 IP 不一致", reason)
+
     def test_disabled_auto_slider_waits_for_manual_success_and_snapshots_cookies(self):
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.auto_slider_enabled = False

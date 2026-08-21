@@ -7960,6 +7960,36 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】检查是否需要滑块验证时出错: {self._safe_str(e)}")
             return False
 
+    async def _probe_token_request_outbound_ip(self) -> Optional[str]:
+        """探测当前 Token HTTP 链路的出口 IP；失败时放行，不阻断原流程。"""
+        probe_url = os.environ.get(
+            'XY_OUTBOUND_IP_PROBE_URL',
+            'https://api.ipify.org?format=json',
+        ).strip()
+        if not probe_url:
+            return None
+        try:
+            if not self.session:
+                await self.create_session()
+            request_kwargs = {}
+            if getattr(self, '_http_proxy_url', None):
+                request_kwargs['proxy'] = self._http_proxy_url
+            async with self.session.get(
+                probe_url,
+                timeout=aiohttp.ClientTimeout(total=5),
+                **request_kwargs,
+            ) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json(content_type=None)
+                ip_value = str((payload or {}).get('ip') or '').strip()
+                if ip_value:
+                    logger.info(f"【{self.cookie_id}】验证前已记录 Token 链路出口 IP 指纹")
+                    return ip_value
+        except Exception as probe_error:
+            logger.debug(f"【{self.cookie_id}】Token 链路出口 IP 探测失败，按兼容模式继续: {probe_error}")
+        return None
+
     async def _handle_captcha_verification(self, res_json: dict) -> str:
         """处理滑块验证，返回新的cookies字符串"""
         try:
@@ -8000,6 +8030,10 @@ class XianyuLive:
                 # 读取账号配置以决定浏览器模式（默认无头）
                 account_info = db_manager.get_cookie_details(self.cookie_id) or {}
                 show_browser = bool(account_info.get('show_browser', False))
+                # 在启动浏览器前记录 Token 请求链路的出口 IP。滑块浏览器启动后会
+                # 再探测一次；两者不一致时延迟验证，避免跨出口使用绑定的 x5secdata。
+                expected_outbound_ip = await self._probe_token_request_outbound_ip()
+
                 # 创建独立的滑块验证实例（每个用户独立实例，避免并发冲突）
                 slider_stealth = XianyuSliderStealth(
                     user_id=f"{self.cookie_id}",  # 使用唯一ID避免冲突
@@ -8011,6 +8045,7 @@ class XianyuLive:
                 )
                 # 给当前滑块实例打上 token_refresh 场景标，让滑块层在硬拒绝时尽早交还给外层走账密恢复
                 slider_stealth.risk_trigger_scene = 'token_refresh'
+                slider_stealth.expected_outbound_ip = expected_outbound_ip
 
                 # 直接使用异步方法执行滑块验证（避免 ThreadPoolExecutor 导致的 Playwright 初始化问题）
                 strict_result = await run_slider_async_with_fallback(slider_stealth, verification_url, engine="playwright")

@@ -8020,6 +8020,42 @@ class XianyuLive:
             logger.debug(f"【{self.cookie_id}】Token 链路出口 IP 探测失败，按兼容模式继续: {probe_error}")
         return None
 
+    async def _check_slider_country_gate(self) -> Tuple[bool, str]:
+        """仅允许配置国家的出口启动平台验证浏览器。"""
+        allowed = {
+            item.strip().upper()
+            for item in os.environ.get('XY_SLIDER_ALLOWED_COUNTRIES', 'CN').split(',')
+            if item.strip()
+        }
+        if not allowed:
+            return True, ''
+        probe_url = os.environ.get('XY_SLIDER_GEO_URL', 'https://api.country.is/').strip()
+        fail_open = os.environ.get('XY_SLIDER_GEO_FAIL_OPEN', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+        try:
+            if not self.session:
+                await self.create_session()
+            request_kwargs = {}
+            if getattr(self, '_http_proxy_url', None):
+                request_kwargs['proxy'] = self._http_proxy_url
+            async with self.session.get(
+                probe_url,
+                timeout=aiohttp.ClientTimeout(total=5),
+                **request_kwargs,
+            ) as response:
+                payload = await response.json(content_type=None)
+                country = str((payload or {}).get('country') or '').strip().upper()
+                if country in allowed:
+                    logger.info(f"【{self.cookie_id}】验证前出口国家检查通过: {country}")
+                    return True, ''
+                if country:
+                    return False, f'当前出口国家为 {country}，允许范围为 {",".join(sorted(allowed))}'
+                raise RuntimeError('国家代码为空')
+        except Exception as geo_error:
+            if fail_open:
+                logger.warning(f"【{self.cookie_id}】出口国家检查失败，按配置放行: {geo_error}")
+                return True, ''
+            return False, f'无法确认出口国家，已安全阻止验证: {self._safe_str(geo_error)}'
+
     async def _handle_captcha_verification(self, res_json: dict) -> str:
         """处理滑块验证，返回新的cookies字符串"""
         try:
@@ -8049,6 +8085,12 @@ class XianyuLive:
                 return None
 
             logger.info(f"【{self.cookie_id}】验证URL: {verification_url}")
+
+            country_allowed, country_reason = await self._check_slider_country_gate()
+            if not country_allowed:
+                self.last_slider_result_message = country_reason
+                logger.warning(f"【{self.cookie_id}】验证前国家门控已阻止滑块: {country_reason}")
+                return None
 
             # 使用滑块验证器（独立实例，解决并发冲突）
             try:
@@ -14479,6 +14521,11 @@ class XianyuLive:
         Returns:
             bool: 成功返回True，失败返回False
         """
+        country_allowed, country_reason = await self._check_slider_country_gate()
+        if not country_allowed:
+            logger.warning(f"【{self.cookie_id}】国家门控已阻止浏览器 Cookie 稳定化: {country_reason}")
+            return False
+
         playwright = None
         browser = None
 
@@ -14758,6 +14805,11 @@ class XianyuLive:
         Args:
             triggered_by_refresh_token: 是否由refresh_token方法触发，如果是True则设置browser_cookie_refreshed标志
         """
+
+        country_allowed, country_reason = await self._check_slider_country_gate()
+        if not country_allowed:
+            logger.warning(f"【{self.cookie_id}】国家门控已阻止浏览器 Cookie 刷新: {country_reason}")
+            return False
 
 
         playwright = None

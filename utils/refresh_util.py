@@ -298,6 +298,28 @@ class DrissionHandler:
     def _slide(self):
         """处理滑动验证码"""
         try:
+            allowed_countries = {
+                item.strip().upper()
+                for item in os.environ.get('XY_SLIDER_ALLOWED_COUNTRIES', 'CN').split(',')
+                if item.strip()
+            }
+            if allowed_countries:
+                try:
+                    geo_url = os.environ.get('XY_SLIDER_GEO_URL', 'https://api.country.is/').strip()
+                    country = str(requests.get(geo_url, timeout=5).json().get('country') or '').upper()
+                    if country not in allowed_countries:
+                        self.country_gate_blocked = True
+                        logger.warning(
+                            f"订单详情滑块已被国家门控阻止: 当前出口国家为 {country or '未知'}，"
+                            f"允许范围为 {','.join(sorted(allowed_countries))}"
+                        )
+                        return
+                except Exception as geo_error:
+                    if os.environ.get('XY_SLIDER_GEO_FAIL_OPEN', '0').lower() not in {'1', 'true', 'yes', 'on'}:
+                        self.country_gate_blocked = True
+                        logger.warning(f"订单详情滑块国家检查失败，已安全阻止: {geo_error}")
+                        return
+
             self.slide_attempt += 1
             logger.info(f"尝试处理滑动验证码... (第{self.slide_attempt}次)")
 
@@ -1205,7 +1227,11 @@ class DrissionHandler:
                         # 等待一下确保注入完成
                         time.sleep(0.5)
 
+                    self.country_gate_blocked = False
                     self._slide()  # 处理滑块验证码
+                    if self.country_gate_blocked:
+                        logger.warning("国家门控阻止订单详情滑块，本轮不再重试")
+                        return None
 
                     if not self._detect_captcha():
                         logger.info("滑块验证成功，开始获取 cookies")

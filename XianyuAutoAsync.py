@@ -7274,6 +7274,35 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】轻量会话保活异常: {self._safe_str(e)}")
             return False
 
+    @staticmethod
+    def _get_local_token_browser_identity() -> Tuple[str, str]:
+        """让 Token 请求头与随后处理验证的本机浏览器版本保持一致。"""
+        full_version = '139.0.0.0'
+        browser_family = 'chrome'
+        try:
+            from utils.xianyu_slider_stealth import XianyuSliderStealth
+            detector = XianyuSliderStealth.__new__(XianyuSliderStealth)
+            info = detector._detect_local_browser_info() or {}
+            detected_version = str(info.get('version') or '').strip()
+            if re.fullmatch(r'\d+\.\d+\.\d+\.\d+', detected_version):
+                full_version = detected_version
+                browser_family = str(info.get('family') or 'chrome').lower()
+        except Exception as identity_error:
+            logger.debug(f"读取本机浏览器版本失败，使用兼容 UA: {identity_error}")
+
+        major_version = full_version.split('.', 1)[0]
+        edge_suffix = f' Edg/{full_version}' if browser_family == 'edge' else ''
+        user_agent = (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            f'(KHTML, like Gecko) Chrome/{full_version} Safari/537.36{edge_suffix}'
+        )
+        brand_name = 'Microsoft Edge' if browser_family == 'edge' else 'Google Chrome'
+        sec_ch_ua = (
+            f'"{brand_name}";v="{major_version}", "Chromium";v="{major_version}", '
+            '"Not_A Brand";v="24"'
+        )
+        return user_agent, sec_ch_ua
+
     async def _refresh_token_impl(self, captcha_retry_count: int = 0, post_slider_session_grace_used: bool = False,
                                   allow_password_login_recovery: bool = True,
                                   manual_refresh_browser_stabilization_used: bool = False,
@@ -7361,6 +7390,7 @@ class XianyuLive:
             params['sign'] = sign
 
             # 发送请求 - 使用与浏览器完全一致的请求头
+            token_user_agent, token_sec_ch_ua = self._get_local_token_browser_identity()
             headers = {
                 'accept': 'application/json',
                 'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
@@ -7368,13 +7398,13 @@ class XianyuLive:
                 'content-type': 'application/x-www-form-urlencoded',
                 'pragma': 'no-cache',
                 'priority': 'u=1, i',
-                'sec-ch-ua': '"Not;A=Brand";v="99", "Google Chrome";v="139", "Chromium";v="139"',
+                'sec-ch-ua': token_sec_ch_ua,
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'empty',
                 'sec-fetch-mode': 'cors',
                 'sec-fetch-site': 'same-site',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                'user-agent': token_user_agent,
                 'referer': 'https://www.goofish.com/',
                 'origin': 'https://www.goofish.com',
                 'cookie': self.cookies_str

@@ -1052,8 +1052,11 @@ class XianyuSliderStealth:
                 self.local_browser_info = dict(detected_browser)
                 detected_path = str(detected_browser.get("path") or "").strip()
                 detected_channel = str(detected_browser.get("channel") or "").strip()
-                if os.name == 'nt' and detected_channel:
-                    self.browser_channel = detected_channel
+                # Windows 上直接绑定探测到的可执行文件，确保运行内核、UA 和
+                # Client Hints 来自同一份真实浏览器，而不是由 channel 再解析。
+                if os.name == 'nt' and detected_path:
+                    self.executable_path = detected_path
+                    self.browser_channel = None
                 elif detected_path:
                     self.executable_path = detected_path
                 elif detected_channel:
@@ -2339,7 +2342,9 @@ class XianyuSliderStealth:
             # 启动浏览器，使用稳定特征
             logger.info(
                 f"【{self.pure_user_id}】启动浏览器，headless模式: {self.headless}, "
-                f"画像: {self.profile_id}, UA: {browser_features['user_agent']}"
+                f"画像: {self.profile_id}, 本机浏览器版本: "
+                f"{(self.local_browser_info or {}).get('version') or 'unknown'}, "
+                f"UA: {browser_features['user_agent']}"
             )
             launch_options: Dict[str, Any] = {
                 "headless": self.headless,

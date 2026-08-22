@@ -48,6 +48,84 @@ ORDER_STATUS_ALIASES = {
 }
 
 
+class OrderHistorySyncError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = 'api_error',
+        ret_value: Any = None,
+        guidance: str = '',
+    ):
+        super().__init__(message)
+        self.kind = kind
+        self.ret_value = ret_value
+        self.guidance = guidance
+
+
+def _ret_value_to_text(ret_value: Any) -> str:
+    if isinstance(ret_value, str):
+        return ret_value
+    if isinstance(ret_value, (list, tuple)):
+        return ' | '.join(str(item) for item in ret_value)
+    if isinstance(ret_value, dict):
+        try:
+            return json.dumps(ret_value, ensure_ascii=False)
+        except Exception:
+            return str(ret_value)
+    return str(ret_value or '')
+
+
+def classify_order_history_api_error(ret_value: Any, cookie_id: str = 'unknown') -> OrderHistorySyncError:
+    ret_text = _ret_value_to_text(ret_value)
+    ret_text_lower = ret_text.lower()
+    account_label = cookie_id or 'unknown'
+
+    session_keywords = (
+        '令牌过期',
+        'session过期',
+        'session expired',
+        'FAIL_SYS_USER_VALIDATE',
+        'FAIL_SYS_TOKEN_EXPIRED',
+        'FAIL_SYS_TOKEN_EXOIRED',
+        'FAIL_SYS_SESSION_EXPIRED',
+        'passport.goofish.com',
+        'mini_login',
+        'login',
+    )
+    permission_keywords = (
+        'PERMISSION_EXCEPTION',
+        '无权限访问',
+        'permission denied',
+        'permission',
+    )
+
+    if any(keyword.lower() in ret_text_lower for keyword in session_keywords):
+        guidance = '请先对该账号执行手动刷新 Cookie 或重新扫码登录；若仍失败，导入浏览器中人工登录后的完整 Cookie 后再同步。'
+        return OrderHistorySyncError(
+            f'【{account_label}】历史订单列表 Cookie/Session 已过期，无法同步历史订单。平台返回: {ret_text}',
+            kind='session_expired',
+            ret_value=ret_value,
+            guidance=guidance,
+        )
+
+    if any(keyword.lower() in ret_text_lower for keyword in permission_keywords):
+        guidance = '请确认该账号可以在闲鱼/鱼店长卖家中心打开订单管理页；如果网页端也无权限，该接口无法由程序侧修复。'
+        return OrderHistorySyncError(
+            f'【{account_label}】账号暂无订单列表访问权限，无法同步历史订单。平台返回: {ret_text}',
+            kind='permission_denied',
+            ret_value=ret_value,
+            guidance=guidance,
+        )
+
+    return OrderHistorySyncError(
+        f'【{account_label}】历史订单列表 API 调用失败: {ret_text}',
+        kind='api_error',
+        ret_value=ret_value,
+        guidance='请稍后重试；如果持续失败，请查看日志中的平台返回值和账号 Cookie 状态。',
+    )
+
+
 def normalize_order_history_status(value: Any) -> Optional[str]:
     text = str(value or '').strip()
     if not text:

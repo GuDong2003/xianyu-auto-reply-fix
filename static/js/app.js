@@ -3600,6 +3600,7 @@ function getMessageFilterSourceLabel(source) {
     return ({
         user: '客户',
         system: '系统',
+        ai: 'AI回复',
         all: '全部'
     }[String(source || 'user')] || '客户');
 }

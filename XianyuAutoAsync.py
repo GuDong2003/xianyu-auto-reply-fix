@@ -7277,6 +7277,35 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】轻量会话保活异常: {self._safe_str(e)}")
             return False
 
+    @staticmethod
+    def _get_local_token_browser_identity() -> Tuple[str, str]:
+        """让 Token 请求头与随后处理验证的本机浏览器版本保持一致。"""
+        full_version = '139.0.0.0'
+        browser_family = 'chrome'
+        try:
+            from utils.xianyu_slider_stealth import XianyuSliderStealth
+            detector = XianyuSliderStealth.__new__(XianyuSliderStealth)
+            info = detector._detect_local_browser_info() or {}
+            detected_version = str(info.get('version') or '').strip()
+            if re.fullmatch(r'\d+\.\d+\.\d+\.\d+', detected_version):
+                full_version = detected_version
+                browser_family = str(info.get('family') or 'chrome').lower()
+        except Exception as identity_error:
+            logger.debug(f"读取本机浏览器版本失败，使用兼容 UA: {identity_error}")
+
+        major_version = full_version.split('.', 1)[0]
+        edge_suffix = f' Edg/{full_version}' if browser_family == 'edge' else ''
+        user_agent = (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            f'(KHTML, like Gecko) Chrome/{full_version} Safari/537.36{edge_suffix}'
+        )
+        brand_name = 'Microsoft Edge' if browser_family == 'edge' else 'Google Chrome'
+        sec_ch_ua = (
+            f'"{brand_name}";v="{major_version}", "Chromium";v="{major_version}", '
+            '"Not_A Brand";v="24"'
+        )
+        return user_agent, sec_ch_ua
+
     async def _refresh_token_impl(self, captcha_retry_count: int = 0, post_slider_session_grace_used: bool = False,
                                   allow_password_login_recovery: bool = True,
                                   manual_refresh_browser_stabilization_used: bool = False,
@@ -7364,6 +7393,7 @@ class XianyuLive:
             params['sign'] = sign
 
             # 发送请求 - 使用与浏览器完全一致的请求头
+            token_user_agent, token_sec_ch_ua = self._get_local_token_browser_identity()
             headers = {
                 'accept': 'application/json',
                 'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
@@ -7371,13 +7401,13 @@ class XianyuLive:
                 'content-type': 'application/x-www-form-urlencoded',
                 'pragma': 'no-cache',
                 'priority': 'u=1, i',
-                'sec-ch-ua': '"Not;A=Brand";v="99", "Google Chrome";v="139", "Chromium";v="139"',
+                'sec-ch-ua': token_sec_ch_ua,
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'empty',
                 'sec-fetch-mode': 'cors',
                 'sec-fetch-site': 'same-site',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                'user-agent': token_user_agent,
                 'referer': 'https://www.goofish.com/',
                 'origin': 'https://www.goofish.com',
                 'cookie': self.cookies_str
@@ -7963,6 +7993,36 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】检查是否需要滑块验证时出错: {self._safe_str(e)}")
             return False
 
+    async def _probe_token_request_outbound_ip(self) -> Optional[str]:
+        """探测当前 Token HTTP 链路的出口 IP；失败时放行，不阻断原流程。"""
+        probe_url = os.environ.get(
+            'XY_OUTBOUND_IP_PROBE_URL',
+            'https://api.ipify.org?format=json',
+        ).strip()
+        if not probe_url:
+            return None
+        try:
+            if not self.session:
+                await self.create_session()
+            request_kwargs = {}
+            if getattr(self, '_http_proxy_url', None):
+                request_kwargs['proxy'] = self._http_proxy_url
+            async with self.session.get(
+                probe_url,
+                timeout=aiohttp.ClientTimeout(total=5),
+                **request_kwargs,
+            ) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json(content_type=None)
+                ip_value = str((payload or {}).get('ip') or '').strip()
+                if ip_value:
+                    logger.info(f"【{self.cookie_id}】验证前已记录 Token 链路出口 IP 指纹")
+                    return ip_value
+        except Exception as probe_error:
+            logger.debug(f"【{self.cookie_id}】Token 链路出口 IP 探测失败，按兼容模式继续: {probe_error}")
+        return None
+
     async def _handle_captcha_verification(self, res_json: dict) -> str:
         """处理滑块验证，返回新的cookies字符串"""
         try:
@@ -8003,6 +8063,10 @@ class XianyuLive:
                 # 读取账号配置以决定浏览器模式（默认无头）
                 account_info = db_manager.get_cookie_details(self.cookie_id) or {}
                 show_browser = bool(account_info.get('show_browser', False))
+                # 在启动浏览器前记录 Token 请求链路的出口 IP。滑块浏览器启动后会
+                # 再探测一次；两者不一致时延迟验证，避免跨出口使用绑定的 x5secdata。
+                expected_outbound_ip = await self._probe_token_request_outbound_ip()
+
                 # 创建独立的滑块验证实例（每个用户独立实例，避免并发冲突）
                 slider_stealth = XianyuSliderStealth(
                     user_id=f"{self.cookie_id}",  # 使用唯一ID避免冲突
@@ -8014,6 +8078,7 @@ class XianyuLive:
                 )
                 # 给当前滑块实例打上 token_refresh 场景标，让滑块层在硬拒绝时尽早交还给外层走账密恢复
                 slider_stealth.risk_trigger_scene = 'token_refresh'
+                slider_stealth.expected_outbound_ip = expected_outbound_ip
 
                 # 直接使用异步方法执行滑块验证（避免 ThreadPoolExecutor 导致的 Playwright 初始化问题）
                 strict_result = await run_slider_async_with_fallback(slider_stealth, verification_url, engine="playwright")
@@ -14696,7 +14761,6 @@ class XianyuLive:
         Args:
             triggered_by_refresh_token: 是否由refresh_token方法触发，如果是True则设置browser_cookie_refreshed标志
         """
-
 
         playwright = None
         browser = None

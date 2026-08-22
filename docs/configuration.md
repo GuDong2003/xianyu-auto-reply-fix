@@ -31,7 +31,20 @@ USE_XVFB=true
 ENABLE_HEADFUL=true
 ENABLE_VNC=false
 DISPLAY=:99
+
+# 滑块人工接管（可选；默认仍启用自动滑块）
+XY_ENABLE_AUTO_SLIDER=0
+XY_MANUAL_SLIDER_TIMEOUT=180
+
+# Token 滑块验证前风险门控（可选）
+XY_SLIDER_RISK_WINDOW=1800
+XY_SLIDER_RISK_FAILURE_THRESHOLD=6
+XY_OUTBOUND_IP_PROBE_URL=https://api.ipify.org?format=json
 ```
+
+`XY_ENABLE_AUTO_SLIDER` 未设置时保持原有自动滑块行为。将它设置为 `0`、`false`、`no` 或 `off` 后，程序会改用有头浏览器等待人工完成验证。`XY_MANUAL_SLIDER_TIMEOUT` 用于设置等待秒数，默认 `180`，最小 `30`。
+
+Token 刷新触发滑块时，程序会在启动验证前检查近期硬拒绝、连续失败压力，以及 Token 请求和验证浏览器的出口 IP 是否一致。`XY_SLIDER_RISK_WINDOW` 是风险统计和冷却窗口（默认 `1800` 秒），`XY_SLIDER_RISK_FAILURE_THRESHOLD` 是窗口内无成功记录时暂停验证的失败次数（默认 `6`）。IP 探测失败会兼容放行；将 `XY_OUTBOUND_IP_PROBE_URL` 设为空可关闭出口 IP 对比。
 
 ## 全局配置文件
 

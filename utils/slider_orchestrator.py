@@ -266,6 +266,20 @@ def run_slider_with_fallback(
     if primary_result.success:
         return primary_result
 
+    # 风险门控或硬风控已经明确要求停止时，不得再启动 DrissionPage。
+    # 否则主引擎刚拦截，旧兜底链路又会弹出验证码窗口并重复拖动。
+    feedback = getattr(slider, "last_verification_feedback", None) or {}
+    feedback_status = str(feedback.get("status") or "").strip().lower()
+    if feedback_status in {"preflight_deferred", "hard_block"}:
+        message = str(feedback.get("message") or primary_result.message)
+        return SliderVerificationResult(
+            success=False,
+            cookies=None,
+            engine=str(engine or DEFAULT_SLIDER_ENGINE),
+            x5_cookies={},
+            message=message,
+        )
+
     enabled = _env_bool("XY_SLIDER_DRISSION_FALLBACK", True) if fallback_enabled is None else bool(fallback_enabled)
     if not enabled:
         return primary_result

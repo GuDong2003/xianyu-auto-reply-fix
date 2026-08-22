@@ -2343,7 +2343,7 @@ class XianyuSliderStealth:
             logger.info(
                 f"【{self.pure_user_id}】启动浏览器，headless模式: {self.headless}, "
                 f"画像: {self.profile_id}, 本机浏览器版本: "
-                f"{(self.local_browser_info or {}).get('version') or 'unknown'}, "
+                f"{(getattr(self, 'local_browser_info', None) or {}).get('version') or 'unknown'}, "
                 f"UA: {browser_features['user_agent']}"
             )
             launch_options: Dict[str, Any] = {

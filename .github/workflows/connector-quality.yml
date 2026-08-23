@@ -1,0 +1,98 @@
+name: Connector quality gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      run_image_gate:
+        description: Run the production image pointer gate
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: >-
+          uv run ruff check xianyu_connector xianyu_control
+          deploy/remote_verification_pointer_e2e.py
+          tests/test_account_operation_coordinator.py
+          tests/test_account_supervisor.py
+          tests/test_alembic_revision_persistence.py
+          tests/test_bounded_process.py tests/test_browser_auth_worker.py
+          tests/test_connector_api.py tests/test_connector_domain.py
+          tests/test_connector_ops.py tests/test_connector_repositories.py
+          tests/test_connector_security.py tests/test_connector_verification.py
+          tests/test_control_accounts_api.py
+          tests/test_control_browser_runtime.py
+          tests/test_control_connector_client.py
+          tests/test_control_remote_verification.py
+          tests/test_control_verification.py
+          tests/test_deploy_release_safety.py tests/test_egress_guard.py
+          tests/test_file_log_collector.py tests/test_legacy_adapter_policy.py
+          tests/test_local_verification_handoff.py
+          tests/test_production_image_contract.py
+          tests/test_qr_auth_manager.py tests/test_qr_bootstrap.py
+          tests/test_qr_relogin_ui.py
+          tests/test_remote_verification_pointer_e2e.py
+          tests/test_runtime_compat.py tests/test_runtime_reporter.py
+          tests/test_slider_verification_guards.py
+          tests/test_verification_backend.py tests/test_verification_browser.py
+          tests/test_verification_rfb.py tests/test_verification_runtime.py
+      - run: uv run mypy --strict xianyu_connector xianyu_control
+      - run: uv run pytest -q tests --cov=xianyu_connector --cov=xianyu_control --cov-fail-under=80
+      - run: uv run pytest -q tests --cov=xianyu_connector/application --cov=xianyu_connector/domain --cov-config=/dev/null --cov-branch --cov-fail-under=90
+      - run: uv run bandit -c pyproject.toml -q -r xianyu_connector xianyu_control
+      - run: uv run pip-audit
+
+  image:
+    needs: quality
+    if: >-
+      ${{ github.event_name == 'pull_request' || github.event_name == 'push' ||
+      inputs.run_image_gate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Verify vendored noVNC supply chain
+        run: |
+          test "$(tr -d '\r\n' < static/vendor/novnc/VERSION)" = "1.7.0"
+          sha256sum -c deploy/novnc.SHA256SUMS
+          sha256sum -c deploy/novnc-source.SHA256SUMS
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/Dockerfile.production
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: xianyu-connector:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run production remote pointer E2E
+        run: >-
+          docker run --rm --platform linux/amd64 --read-only
+          --tmpfs /tmp:rw,noexec,nosuid,size=128m
+          --entrypoint /app/deploy/run-remote-verification-pointer-e2e.sh
+          xianyu-connector:ci
+      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+        with:
+          image-ref: xianyu-connector:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

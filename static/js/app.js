@@ -240,6 +240,28 @@ function getAuthToken() {
     return authToken || '';
 }
 
+async function authenticatedFetch(input, options = {}) {
+    const token = getAuthToken();
+    const headers = { ...(options.headers || {}) };
+    delete headers.Authorization;
+    delete headers.authorization;
+    if (token) {
+        headers.Authorization = `Bearer ${token}`;
+    }
+    const response = await fetch(input, { ...options, headers });
+    if (response.status === 401) {
+        localStorage.removeItem('auth_token');
+        authToken = '';
+        if (typeof clearQRCodeCheck === 'function') {
+            clearQRCodeCheck();
+        }
+        if (location.pathname !== '/') {
+            location.href = '/';
+        }
+    }
+    return response;
+}
+
 // 移动端侧边栏切换
 function toggleSidebar() {
     document.getElementById('sidebar').classList.toggle('show');
@@ -696,7 +718,76 @@ function renderDashboardAccountMetric(label, value, tone = 'off') {
     `;
 }
 
+function getConnectorRuntimeState(runtimeStatus) {
+    const state = runtimeStatus?.connector_state
+        ?? runtimeStatus?.runtime_state
+        ?? runtimeStatus?.state
+        ?? '';
+    return String(state).trim().toLowerCase();
+}
+
+function isConnectorManualVerificationRequired(runtimeStatus) {
+    const states = [
+        runtimeStatus?.connector_state,
+        runtimeStatus?.runtime_state,
+        runtimeStatus?.state,
+    ].map(value => String(value || '').trim().toLowerCase());
+    if (states.includes('manual_verification_required')) {
+        return true;
+    }
+    const reasonCodes = [
+        runtimeStatus?.connector_reason_code,
+        runtimeStatus?.reason_code,
+    ].map(value => String(value || '').trim().toLowerCase());
+    const manualReasonCodes = new Set([
+        'risk_challenge',
+        'session_expired',
+        'cookie_missing',
+        'manual_verification_required',
+    ]);
+    return reasonCodes.some(code => manualReasonCodes.has(code));
+}
+
+function getConnectorRuntimeLabel(runtimeStatus) {
+    const connectorState = getConnectorRuntimeState(runtimeStatus);
+    if (isConnectorManualVerificationRequired(runtimeStatus)) {
+        return '需重新认证';
+    }
+    const labels = {
+        online: '在线',
+        connecting: '连接中',
+        authenticating: '认证中',
+        recovering: '恢复中',
+        degraded: '连接异常',
+        offline: '离线',
+        paused: '已暂停',
+        failed: '失败',
+    };
+    return labels[connectorState] || connectorState;
+}
+
+function isQrManualVerificationHandoffAllowed(runtimeStatus, qrStartedAt = 0, options = {}) {
+    const states = [
+        runtimeStatus?.connector_state,
+        runtimeStatus?.runtime_state,
+        runtimeStatus?.state,
+    ].map(value => String(value || '').trim().toLowerCase());
+    const reasons = [
+        runtimeStatus?.connector_reason_code,
+        runtimeStatus?.reason_code,
+    ].map(value => String(value || '').trim().toLowerCase());
+    const enteredAt = Date.parse(String(runtimeStatus?.entered_at || '')) / 1000;
+    const stateIsCurrent = options.allowStaleEnteredAt || !qrStartedAt
+        || (Number.isFinite(enteredAt) && enteredAt >= Number(qrStartedAt) - 1);
+    return stateIsCurrent
+        && states.includes('manual_verification_required')
+        && reasons.some(reason => ['risk_challenge', 'manual_verification_required'].includes(reason));
+}
+
 function isRuntimeStatusHealthy(runtimeStatus) {
+    if (isConnectorManualVerificationRequired(runtimeStatus)) {
+        return false;
+    }
     return Boolean(
         runtimeStatus?.running
         && runtimeStatus.ws_ready
@@ -725,6 +816,9 @@ function getRuntimeStatusRecentAnchor(runtimeStatus) {
 }
 
 function shouldAutoRetryRuntimeStatus(runtimeStatus) {
+    if (isConnectorManualVerificationRequired(runtimeStatus)) {
+        return false;
+    }
     if (!runtimeStatus?.running) {
         return false;
     }
@@ -860,14 +954,19 @@ function scheduleAboutRuntimeAutoRetry(accountId, runtimeStatus) {
 
 function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
     const normalizedRuntimeStatus = runtimeStatus || {};
+    const connectorNeedsManual = isConnectorManualVerificationRequired(normalizedRuntimeStatus);
     const connectionState = normalizedRuntimeStatus.connection_state || 'not_running';
     const keepaliveDisplayStatus = normalizedRuntimeStatus.session_keepalive_display_status || normalizedRuntimeStatus.session_keepalive_status || '';
     const tokenStatus = normalizedRuntimeStatus.token_refresh_status || '';
     const messageStreamDisplay = getMessageStreamRuntimeDisplay(normalizedRuntimeStatus);
     const messageStreamStatus = messageStreamDisplay.status;
 
-    const connectionText = getAboutStatusText('connection', connectionState) || '未运行';
-    const connectionTone = getAboutStatusVariant('connection', connectionState);
+    const connectionText = connectorNeedsManual
+        ? '需重新认证'
+        : (getAboutStatusText('connection', connectionState) || '未运行');
+    const connectionTone = connectorNeedsManual
+        ? 'danger'
+        : getAboutStatusVariant('connection', connectionState);
     const keepaliveText = keepaliveDisplayStatus
         ? (getAboutStatusText('keepalive', keepaliveDisplayStatus) || keepaliveDisplayStatus)
         : (normalizedRuntimeStatus.running ? '未执行' : '未运行');
@@ -887,10 +986,14 @@ function renderDashboardAccountRuntimeSnapshot(runtimeStatus) {
         ? getAboutStatusVariant('stream', messageStreamStatus)
         : 'secondary';
     const runningHealthy = isRuntimeStatusHealthy(normalizedRuntimeStatus);
-    const summaryText = !normalizedRuntimeStatus.running
+    const summaryText = connectorNeedsManual
+        ? '需重新认证'
+        : !normalizedRuntimeStatus.running
         ? '未运行'
         : (runningHealthy ? '运行正常' : '部分异常');
-    const summaryTone = !normalizedRuntimeStatus.running
+    const summaryTone = connectorNeedsManual
+        ? 'danger'
+        : !normalizedRuntimeStatus.running
         ? 'secondary'
         : (runningHealthy ? 'success' : 'warning');
     const items = [
@@ -935,36 +1038,13 @@ function renderStatusNoteBadge(statusNote, className) {
     `;
 }
 
-function getNoVncUrl() {
-    const hostname = window.location.hostname || 'localhost';
-    return `http://${hostname}:6080/vnc.html?autoconnect=1&resize=scale`;
-}
-
-function isVncManualActionAvailable(runtimeStatus) {
-    if (!runtimeStatus) {
-        return false;
-    }
-
-    if (runtimeStatus.vnc_manual_action_available === true) {
-        return true;
-    }
-
-    const tokenStatus = String(runtimeStatus.token_refresh_status || '').trim();
-    const vncRelevantStatuses = new Set([
-        'manual_refresh_active',
-        'manual_refresh_browser_stabilizing',
-        'verification_pending_manual',
-        'manual_verification_required',
-    ]);
-    return vncRelevantStatuses.has(tokenStatus);
-}
-
-function getManualInterventionAlert(statusNote, runtimeStatus) {
+function getManualInterventionAlert(statusNote, runtimeStatus, accountId = '') {
     const noteText = String(statusNote || '').trim();
+    const connectorNeedsManual = isConnectorManualVerificationRequired(runtimeStatus);
+    const connectorReason = String(runtimeStatus?.connector_reason_message || '').trim();
     const tokenStatus = String(runtimeStatus?.token_refresh_status || '').trim();
     const tokenError = String(runtimeStatus?.token_refresh_error_message || '').trim();
     const combinedText = `${noteText} ${tokenStatus} ${tokenError}`;
-    const vncAvailable = isVncManualActionAvailable(runtimeStatus);
     const manualStatuses = new Set([
         'account_risk_protected',
         'manual_verification_required',
@@ -976,7 +1056,8 @@ function getManualInterventionAlert(statusNote, runtimeStatus) {
         'token_refresh_exception',
     ]);
     const manualKeywords = ['滑块', '风控', '验证码', '验证', '账号存在风险', '拦截', '客户端登录'];
-    const needsIntervention = Boolean(noteText)
+    const needsIntervention = connectorNeedsManual
+        || Boolean(noteText)
         || manualStatuses.has(tokenStatus)
         || manualKeywords.some(keyword => combinedText.includes(keyword));
 
@@ -984,32 +1065,33 @@ function getManualInterventionAlert(statusNote, runtimeStatus) {
         return null;
     }
 
-    let title = noteText || '检测到滑块/风控，需要人工处理';
-    if (!noteText && tokenStatus === 'password_login_backoff_wait') {
+    let title = connectorNeedsManual
+        ? '账号需要重新认证'
+        : (noteText || '检测到滑块/风控，需要人工处理');
+    if (!connectorNeedsManual && !noteText && tokenStatus === 'password_login_backoff_wait') {
         title = '登录恢复退避中，暂不可接管';
-    } else if (!noteText && tokenStatus === 'captcha_max_retries_exceeded') {
-        title = vncAvailable ? '滑块自动处理失败，需要人工接管' : '滑块自动处理失败，需重新发起恢复';
+    } else if (!connectorNeedsManual && !noteText && tokenStatus === 'captcha_max_retries_exceeded') {
+        title = '滑块自动处理失败，需要人工验证';
     }
 
-    let detail = tokenError || '系统检测到认证链路异常。';
-    if (vncAvailable) {
-        detail = tokenError || '当前存在可接管的浏览器流程，请通过远程桌面完成滑块、扫码、人脸或其他风控验证。';
-    } else if (tokenStatus === 'password_login_backoff_wait') {
+    let detail = connectorNeedsManual
+        ? (connectorReason || '连接器已停止自动恢复，请重新扫码认证。')
+        : (tokenError || '系统检测到认证链路异常。');
+    if (!connectorNeedsManual && tokenStatus === 'password_login_backoff_wait') {
         detail = tokenError || '当前只是失败退避等待，浏览器流程通常已结束。请重新发起“刷新 Cookie”并勾选“显示浏览器”，或等待退避结束。';
-    } else if (tokenStatus === 'captcha_max_retries_exceeded' || tokenStatus === 'token_refresh_failed' || tokenStatus === 'token_refresh_exception') {
+    } else if (!connectorNeedsManual && (tokenStatus === 'captcha_max_retries_exceeded' || tokenStatus === 'token_refresh_failed' || tokenStatus === 'token_refresh_exception')) {
         detail = tokenError || '当前没有可接管的浏览器流程。请重新发起“刷新 Cookie”并勾选“显示浏览器”，让系统打开新的可接管页面。';
     }
 
     return {
         title,
         detail,
-        vncUrl: getNoVncUrl(),
-        vncAvailable,
+        accountId: String(accountId || '').trim(),
     };
 }
 
 function buildManualInterventionAlert(statusNote, runtimeStatus, options = {}) {
-    const alert = getManualInterventionAlert(statusNote, runtimeStatus);
+    const alert = getManualInterventionAlert(statusNote, runtimeStatus, options.accountId);
     if (!alert) {
         return '';
     }
@@ -1024,11 +1106,11 @@ function buildManualInterventionAlert(statusNote, runtimeStatus, options = {}) {
                 <div class="manual-intervention-alert-title">${escapeHtml(alert.title)}</div>
                 <div class="manual-intervention-alert-detail">${escapeHtml(alert.detail)}</div>
             </div>
-            ${alert.vncAvailable ? `
-                <a class="manual-intervention-alert-action" href="${escapeHtml(alert.vncUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation();">
+            ${alert.accountId ? `
+                <button type="button" class="manual-intervention-alert-action" onclick="event.stopPropagation(); openRemoteVerificationConsole('${escapeHtml(alert.accountId)}');">
                     <i class="bi bi-display"></i>
-                    打开远程桌面
-                </a>
+                    打开实时验证
+                </button>
             ` : ''}
         </div>
     `;
@@ -1084,7 +1166,7 @@ function renderDashboardAccountCard(account) {
         renderDashboardAccountMetric('定时擦亮', polishScheduleMetricText, polishScheduleTone)
     ].join('');
     const runtimeSnapshot = renderDashboardAccountRuntimeSnapshot(account.runtime_status);
-    const manualInterventionAlert = buildManualInterventionAlert(statusNoteText, account.runtime_status, { compact: true });
+    const manualInterventionAlert = buildManualInterventionAlert(statusNoteText, account.runtime_status, { compact: true, accountId: account.id });
 
     const secondarySummary = [
         {
@@ -4459,33 +4541,6 @@ function buildAboutReadinessValue(items) {
     `;
 }
 
-function buildAboutVncAccessPanel(runtimeStatus) {
-    if (!isVncManualActionAvailable(runtimeStatus)) {
-        return '';
-    }
-
-    const vncUrl = getNoVncUrl();
-
-    return `
-        <div class="account-diagnostics-vnc-panel">
-            <div class="account-diagnostics-vnc-copy">
-                <div class="account-diagnostics-vnc-title">
-                    <i class="bi bi-display"></i>
-                    <span>当前可通过远程桌面接管</span>
-                </div>
-                <div class="account-diagnostics-vnc-desc">
-                    系统检测到正在运行的有头浏览器认证流程，此时在远程桌面中处理滑块/风控才会被后端继续检测并写回状态。
-                </div>
-                <div class="account-diagnostics-vnc-url">${escapeHtml(vncUrl)}</div>
-            </div>
-            <a class="account-diagnostics-vnc-button" href="${escapeHtml(vncUrl)}" target="_blank" rel="noopener">
-                <i class="bi bi-box-arrow-up-right"></i>
-                打开远程桌面
-            </a>
-        </div>
-    `;
-}
-
 function renderAboutAccountMeta(account) {
     const { accountMeta } = getAboutDiagnosticsElements();
     if (!accountMeta) return;
@@ -4540,6 +4595,13 @@ function renderAboutHistoryPlaceholder(title, subtitle) {
 }
 
 function getAboutRuntimeOverview(runtimeStatus, readinessCount = 0) {
+    if (isConnectorManualVerificationRequired(runtimeStatus)) {
+        return {
+            tone: 'warning',
+            title: '账号需要重新认证',
+            note: String(runtimeStatus?.connector_reason_message || '连接器已停止自动恢复，请点击“重新扫码验证”。'),
+        };
+    }
     if (!runtimeStatus?.running) {
         return {
             tone: 'danger',
@@ -4602,8 +4664,9 @@ function renderAboutRuntimeStatus(runtimeStatus) {
     );
     const messageStreamDisplay = getMessageStreamRuntimeDisplay(runtimeStatus);
     const messageStreamStatus = messageStreamDisplay.status;
+    const connectorNeedsManual = isConnectorManualVerificationRequired(runtimeStatus);
     const readinessItems = [
-        { label: '实例', ready: !!runtimeStatus.running },
+        { label: '实例', ready: !!runtimeStatus.running && !connectorNeedsManual },
         { label: 'WS', ready: !!runtimeStatus.ws_ready },
         { label: 'Session', ready: !!runtimeStatus.session_ready },
         { label: 'Token', ready: !!runtimeStatus.has_current_token },
@@ -4630,8 +4693,7 @@ function renderAboutRuntimeStatus(runtimeStatus) {
                 <div class="account-diagnostics-status-note-title">${escapeHtml(overview.title)}</div>
                 <div class="account-diagnostics-status-note-text">${escapeHtml(overview.note)}</div>
             </div>
-            ${buildManualInterventionAlert(selectedAccount?.status_note || '', runtimeStatus)}
-            ${buildAboutVncAccessPanel(runtimeStatus)}
+            ${buildManualInterventionAlert(selectedAccount?.status_note || '', runtimeStatus, { accountId: selectedAccount?.id })}
             <div class="account-diagnostics-status-body">
                 <div class="account-diagnostics-status-primary">
                     <div class="account-diagnostics-status-grid">
@@ -4803,8 +4865,13 @@ function populateAboutAccountOptions(accounts) {
     accountSelect.innerHTML = `
         <option value="">请选择账号</option>
         ${accounts.map(account => {
-            const runningSuffix = account.runtime_status?.running ? ' · 运行中' : '';
-            return `<option value="${escapeHtml(account.id)}">${escapeHtml(account.id + runningSuffix)}</option>`;
+            const runtimeStatus = account.runtime_status || {};
+            const statusSuffix = isConnectorManualVerificationRequired(runtimeStatus)
+                ? ' · 需重新认证'
+                : (getConnectorRuntimeState(runtimeStatus) === 'online'
+                    ? ' · 在线'
+                    : (runtimeStatus.running ? ' · 运行中' : ''));
+            return `<option value="${escapeHtml(account.id)}">${escapeHtml(account.id + statusSuffix)}</option>`;
         }).join('')}
     `;
 }
@@ -5108,6 +5175,7 @@ async function loadCookies() {
         <td class="align-middle">
             <div class="cookie-id">
             <strong class="text-primary">${cookie.id}</strong>
+            ${renderConnectorReadiness(cookie.runtime_status)}
             </div>
         </td>
         <td class="align-middle">
@@ -5183,7 +5251,10 @@ async function loadCookies() {
             <div class="account-actions-toolbar" role="group" aria-label="账号操作">
             <div class="account-action-group account-action-group-basic" aria-label="基础操作">
                 <span class="account-action-group-label">基础</span>
-                <button class="btn btn-sm btn-outline-secondary account-action-btn" onclick="showFaceVerification('${cookie.id}')" title="查看验证截图" data-action="face-verification">
+                <button class="btn btn-sm btn-outline-info account-action-btn account-action-qr-relogin" onclick="showAccountQRRelogin('${cookie.id}', 'lite')" title="重新扫码登录账号" data-action="qr-relogin">
+                    <i class="bi bi-qr-code-scan"></i><span class="action-text">重登</span>
+                </button>
+                <button class="btn btn-sm btn-outline-secondary account-action-btn" onclick="openRemoteVerificationConsole('${cookie.id}')" title="打开实时人工验证" data-action="remote-verification">
                     <i class="bi bi-shield-check"></i><span class="action-text">验证</span>
                 </button>
                 <button class="btn btn-sm btn-outline-primary account-action-btn" onclick="editCookieInline('${cookie.id}', '${cookie.value}')" title="修改账号信息与Cookie" data-action="edit-cookie" data-requires-enabled="true" ${!isEnabled ? 'disabled' : ''}>
@@ -6450,6 +6521,9 @@ async function logout() {
     stopSalesSummaryRefreshTimer();
     
     try {
+    if (window.RemoteVerificationConsole?.revoke) {
+        await window.RemoteVerificationConsole.revoke();
+    }
     if (authToken) {
         await fetch('/logout', {
         method: 'POST',
@@ -6477,6 +6551,7 @@ async function checkAuth() {
 
     try {
     const response = await fetch('/verify', {
+        cache: 'no-store',
         headers: {
         'Authorization': `Bearer ${token}`
         }
@@ -6488,6 +6563,8 @@ async function checkAuth() {
         window.location.href = '/';
         return false;
     }
+
+    applyFrontendConnectionMode(result.connection_mode);
 
     // 检查是否为管理员，显示管理员菜单和功能
     if (result.is_admin === true) {
@@ -6556,8 +6633,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadSystemVersion();
     // 加载防抖延迟设置
     loadDebounceDelay();
-    // 启动验证会话监控
-    startCaptchaSessionMonitor();
     // 添加Cookie表单提交
     document.getElementById('addForm').addEventListener('submit', handleManualCookieImport);
 
@@ -15122,19 +15197,70 @@ function resetPasswordLoginForm() {
 
 // ========================= 扫码登录相关函数 =========================
 
-let qrCodeCheckInterval = null;
-let qrCodeSessionId = null;
 let qrCodeModalEventsBound = false;
 let qrLoginMode = 'standard'; // 'standard' = 原 Playwright；'lite' = 纯 HTTP (cv-cat 风格)
+let qrLoginTargetAccountId = '';
+let frontendConnectionMode = 'legacy';
+const QR_HANDOFF_RETRY_LIMIT = 3;
+const QR_HANDOFF_RETRY_DELAY_MS = 1000;
 let qrCodeVerificationState = {
-    renderKey: '',
-    toastShown: false,
     inFlight: false,
     completed: false,
-    activeSessionId: null
+    activeSessionId: null,
+    sessionId: null,
+    authProgressObserved: false,
+    startedAt: 0,
+    pollFailureCount: 0,
+    checkTimer: null,
+    generation: 0,
+    generationInFlight: false,
+    handoffFailure: null,
 };
 
+const QR_CODE_LOADING_HTML = `
+    <div class="spinner-border text-success mb-3" role="status" style="width: 3rem; height: 3rem;">
+        <span class="visually-hidden">生成二维码中...</span>
+    </div>
+    <p class="text-muted fs-5 mb-2">正在生成二维码...</p>
+    <div class="alert alert-warning border-0 bg-light-warning d-inline-block qr-loading-tip">
+        <i class="bi bi-clock me-2 text-warning"></i>
+        <small class="text-warning fw-bold">二维码生成较慢，请耐心等待</small>
+    </div>
+`;
+
+function applyFrontendConnectionMode(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    frontendConnectionMode = ['external', 'connector', 'external_connector'].includes(normalized)
+        ? 'external_connector'
+        : 'legacy';
+    const external = frontendConnectionMode === 'external_connector';
+    const legacyOnlyActions = document.querySelectorAll?.('[data-requires-legacy-connection="true"]') || [];
+    legacyOnlyActions.forEach(element => {
+        element.hidden = external;
+        element.disabled = external;
+        element.setAttribute?.('aria-hidden', external ? 'true' : 'false');
+    });
+    const hint = document.getElementById('connectorQrModeHint');
+    if (hint) {
+        hint.hidden = !external;
+    }
+}
+
+function canStartQrLogin(accountId = '') {
+    return frontendConnectionMode !== 'external_connector' || Boolean(String(accountId || '').trim());
+}
+
 function getQRLoginEndpoints() {
+    if (qrLoginTargetAccountId) {
+        const accountPath = encodeURIComponent(qrLoginTargetAccountId);
+        return {
+            generate: `${apiBase}/api/accounts/${accountPath}/qr-sessions`,
+            checkPrefix: `${apiBase}/api/accounts/${accountPath}/qr-sessions/`,
+        };
+    }
+    if (!canStartQrLogin()) {
+        return null;
+    }
     if (qrLoginMode === 'lite') {
         return {
             generate: `${apiBase}/qr-login-lite/generate`,
@@ -15147,10 +15273,50 @@ function getQRLoginEndpoints() {
     };
 }
 
+function renderConnectorReadiness(runtimeStatus) {
+    const connectorState = getConnectorRuntimeState(runtimeStatus);
+    const connectorNeedsManual = isConnectorManualVerificationRequired(runtimeStatus);
+    if (!runtimeStatus || (!connectorState && !connectorNeedsManual)) {
+        return '';
+    }
+    const signals = [
+        ['会话', runtimeStatus.session_ready],
+        ['令牌', runtimeStatus.has_current_token],
+        ['连接', runtimeStatus.ws_ready],
+        ['心跳', runtimeStatus.message_stream_ready],
+    ];
+    const online = !connectorNeedsManual && connectorState === 'online' && signals.every(([, ready]) => Boolean(ready));
+    const stateText = getConnectorRuntimeLabel(runtimeStatus) || '状态未知';
+    const badgeClass = online ? 'bg-success' : (connectorNeedsManual ? 'bg-warning text-dark' : 'bg-secondary');
+    return `
+        <div class="mt-1" title="${escapeHtml(runtimeStatus.connector_reason_message || stateText)}">
+            <span class="badge ${badgeClass}">${escapeHtml(stateText)}</span>
+            <span class="ms-1" aria-label="账号在线检查">
+                ${signals.map(([label, ready]) => `
+                    <span class="${ready ? 'text-success' : 'text-muted'} small" title="${label}${ready ? '就绪' : '未就绪'}">
+                        <i class="bi bi-circle-fill" style="font-size: 0.45rem;"></i>
+                    </span>
+                `).join('')}
+            </span>
+        </div>
+    `;
+}
+
 function applyQRLoginModeChrome() {
     const titleEl = document.getElementById('qrLoginModalTitleText');
     if (titleEl) {
-        titleEl.textContent = qrLoginMode === 'lite' ? '轻量扫码登录闲鱼账号' : '扫码登录闲鱼账号';
+        const modeTitle = qrLoginMode === 'lite' ? '轻量扫码登录闲鱼账号' : '扫码登录闲鱼账号';
+        titleEl.textContent = qrLoginTargetAccountId
+            ? `${modeTitle} · 恢复 ${qrLoginTargetAccountId}`
+            : modeTitle;
+    }
+
+    const targetHint = document.getElementById('qrLoginTargetHint');
+    if (targetHint) {
+        targetHint.style.display = qrLoginTargetAccountId ? 'block' : 'none';
+        targetHint.textContent = qrLoginTargetAccountId
+            ? `请使用账号 ${qrLoginTargetAccountId} 对应的闲鱼 APP 扫码，成功后会更新原账号 Cookie。`
+            : '';
     }
 }
 
@@ -15165,11 +15331,27 @@ function normalizeStaticAssetPath(path) {
 }
 
 function resetQRCodeVerificationState() {
-    qrCodeVerificationState.renderKey = '';
-    qrCodeVerificationState.toastShown = false;
     qrCodeVerificationState.inFlight = false;
     qrCodeVerificationState.completed = false;
     qrCodeVerificationState.activeSessionId = null;
+    qrCodeVerificationState.sessionId = null;
+    qrCodeVerificationState.authProgressObserved = false;
+    qrCodeVerificationState.startedAt = 0;
+    qrCodeVerificationState.pollFailureCount = 0;
+    qrCodeVerificationState.handoffFailure = null;
+}
+
+function getQrHandoffFailure() {
+    return qrCodeVerificationState.handoffFailure;
+}
+
+function setQRCodeRefreshBusy(busy) {
+    const button = document.getElementById('refreshQRBtn');
+    if (!button) return;
+    button.disabled = Boolean(busy);
+    button.innerHTML = busy
+        ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>正在生成'
+        : '<i class="bi bi-arrow-clockwise me-1"></i>重新生成二维码';
 }
 
 function closeQRCodeLoginModal(delay = 3000) {
@@ -15198,78 +15380,240 @@ function initializeQRCodeLoginModal() {
 
     modalElement.addEventListener('hidden.bs.modal', function () {
         clearQRCodeCheck();
+        qrLoginTargetAccountId = '';
+        applyQRLoginModeChrome();
     });
 
     qrCodeModalEventsBound = true;
     return modalElement;
 }
 
+function showAccountQRRelogin(accountId, mode = 'lite') {
+    showQRCodeLogin(mode, accountId);
+}
+
+async function resumeConnectorAccount(accountId) {
+    const normalizedAccountId = String(accountId || '').trim();
+    if (!normalizedAccountId) {
+        return;
+    }
+    const idempotencyKey = `resume:${normalizedAccountId}:${crypto.randomUUID?.() || Date.now()}`;
+    const response = await authenticatedFetch(`${apiBase}/api/accounts/${encodeURIComponent(normalizedAccountId)}/commands`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify({ command: 'resume_after_verification', payload: {} }),
+    });
+    if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        showToast(error.detail || '恢复账号连接失败', 'danger');
+        return;
+    }
+    showToast('已提交恢复命令，正在重新校验账号连接', 'info');
+    await loadCookies();
+}
+
+async function loadQrManualVerificationRuntime(accountId, options = {}) {
+    let response;
+    try {
+        response = await authenticatedFetch(
+            `${apiBase}/api/accounts/${encodeURIComponent(accountId)}/runtime`,
+        );
+    } catch (error) {
+        console.error('加载扫码人工验证状态失败:', error);
+        return {
+            runtime: null,
+            failure: {
+                kind: 'network',
+                message: '扫码后连接校验暂时不可用，请稍后重试',
+            },
+        };
+    }
+    if (!response.ok) {
+        return {
+            runtime: null,
+            failure: {
+                kind: 'network',
+                message: '扫码后连接校验暂时不可用，请稍后重试',
+            },
+        };
+    }
+    const runtimeStatus = await response.json().catch(() => null);
+    const reason = String(
+        runtimeStatus?.connector_reason_code || runtimeStatus?.reason_code || '',
+    ).trim().toLowerCase();
+    if (reason.includes('timeout') || reason.includes('network')) {
+        return {
+            runtime: null,
+            failure: {
+                kind: 'timeout',
+                message: '扫码后连接校验超时，请重新生成二维码',
+            },
+        };
+    }
+    const allowStaleEnteredAt = Boolean(
+        options.allowStaleEnteredAt && qrCodeVerificationState.authProgressObserved,
+    );
+    const allowed = isQrManualVerificationHandoffAllowed(
+        runtimeStatus,
+        qrCodeVerificationState.startedAt,
+        { allowStaleEnteredAt },
+    );
+    return allowed
+        ? { runtime: runtimeStatus, failure: null }
+        : {
+            runtime: null,
+            failure: { kind: 'pending', message: '人工验证窗口正在准备，请稍候' },
+        };
+}
+
+function hideQrModalForManualVerification() {
+    const modalElement = document.getElementById('qrCodeLoginModal');
+    if (!modalElement || !modalElement.classList.contains('show')) {
+        return Promise.resolve();
+    }
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+        };
+        modalElement.addEventListener('hidden.bs.modal', finish, { once: true });
+        (bootstrap.Modal.getInstance(modalElement) || new bootstrap.Modal(modalElement)).hide();
+        setTimeout(finish, 500);
+    });
+}
+
+async function openRemoteVerificationConsole(accountId, options = {}) {
+    const normalizedAccountId = String(accountId || '').trim();
+    if (!normalizedAccountId) return false;
+    if (!window.RemoteVerificationConsole?.start) {
+        showToast('远程验证组件未加载，请刷新页面重试', 'danger');
+        return false;
+    }
+    let errorMessage = '';
+    const started = await window.RemoteVerificationConsole.start({
+        accountId: normalizedAccountId,
+        authToken: getAuthToken(),
+        idempotencyKey: options.idempotencyKey,
+        request: authenticatedFetch,
+        onToast: (message, tone) => {
+            errorMessage = String(message || '');
+            showToast(message, tone);
+        },
+        onRefresh: loadCookies,
+        beforeOpen: options.beforeOpen,
+    });
+    if (!started && typeof options.onError === 'function') {
+        options.onError(errorMessage || '远程验证入口暂时不可用，请稍后重试');
+    }
+    return started;
+}
+
+async function startManualVerification(accountId, options = {}) {
+    const normalizedAccountId = String(accountId || '').trim();
+    const qrSessionId = String(options.qrSessionId || '').trim();
+    if (
+        !normalizedAccountId
+        || !qrSessionId
+        || qrSessionId !== qrCodeVerificationState.activeSessionId
+        || (!qrCodeVerificationState.authProgressObserved && !options.verificationRequired)
+    ) {
+        showToast('请先通过“重登”完成本次二维码扫码', 'warning');
+        return false;
+    }
+    return openRemoteVerificationConsole(normalizedAccountId, {
+        beforeOpen: options.beforeOpen,
+        onError: options.onError,
+        idempotencyKey: `remote-create:${normalizedAccountId}:${qrSessionId}`,
+    });
+}
+
 // 显示扫码登录模态框
-function showQRCodeLogin(mode = 'standard') {
+function showQRCodeLogin(mode = 'standard', accountId = '') {
+    const normalizedAccountId = String(accountId || '').trim();
+    if (!canStartQrLogin(normalizedAccountId)) {
+        showToast('独立连接器模式不支持无目标账号扫码，请在账号列表使用“重登”', 'warning');
+        return false;
+    }
     qrLoginMode = mode === 'lite' ? 'lite' : 'standard';
+    qrLoginTargetAccountId = normalizedAccountId;
     applyQRLoginModeChrome();
     const modalElement = initializeQRCodeLoginModal();
     if (!modalElement) {
         showToast('扫码登录弹窗未找到，请刷新页面重试', 'danger');
-        return;
+        return false;
     }
 
     const modal = bootstrap.Modal.getInstance(modalElement) || new bootstrap.Modal(modalElement);
     modal.show();
-}
-
-// 刷新二维码（兼容旧函数名）
-async function refreshQRCode() {
-    await generateQRCode();
+    return true;
 }
 
 // 生成二维码
 async function generateQRCode() {
+    if (qrCodeVerificationState.generationInFlight) return false;
+    const generationSequence = ++qrCodeVerificationState.generation;
+    qrCodeVerificationState.generationInFlight = true;
+    setQRCodeRefreshBusy(true);
     try {
-    resetQRCodeVerificationState();
     showQRCodeLoading();
 
     const endpoints = getQRLoginEndpoints();
-    const response = await fetch(endpoints.generate, {
+    if (!endpoints) {
+        showQRCodeError('独立连接器模式不支持无目标账号扫码，请在账号列表使用“重登”');
+        return false;
+    }
+    const response = await authenticatedFetch(endpoints.generate, {
         method: 'POST',
         headers: {
-        'Authorization': `Bearer ${authToken}`,
         'Content-Type': 'application/json'
         }
     });
 
+    const data = await response.json().catch(() => ({}));
+    if (generationSequence !== qrCodeVerificationState.generation) return false;
     if (response.ok) {
-        const data = await response.json();
-        if (data.success) {
-        qrCodeSessionId = data.session_id;
+        if (data.success && data.session_id && data.qr_code_url) {
+        qrCodeVerificationState.sessionId = data.session_id;
         qrCodeVerificationState.activeSessionId = data.session_id;
+        qrCodeVerificationState.startedAt = Math.max(0, Number(data.expires_at || 0) - 90);
         showQRCodeImage(data.qr_code_url);
         startQRCodeCheck();
+        return true;
         } else {
         showQRCodeError(data.message || '生成二维码失败');
         }
     } else {
-        showQRCodeError('生成二维码失败');
+        const detail = typeof data.detail === 'string' ? data.detail : '';
+        showQRCodeError(detail || data.message || '生成二维码失败，请点击“重新生成二维码”重试');
     }
     } catch (error) {
+    if (generationSequence !== qrCodeVerificationState.generation) return false;
     console.error('生成二维码失败:', error);
-    showQRCodeError('网络错误，请重试');
+    showQRCodeError('网络错误，请点击“重新生成二维码”重试');
+    } finally {
+    if (generationSequence === qrCodeVerificationState.generation) {
+        qrCodeVerificationState.generationInFlight = false;
+        setQRCodeRefreshBusy(false);
     }
+    }
+    return false;
 }
 
 // 显示二维码加载状态
 function showQRCodeLoading() {
     resetQRCodeVerificationState();
-    document.getElementById('qrCodeContainer').style.display = 'block';
+    const container = document.getElementById('qrCodeContainer');
+    container.innerHTML = QR_CODE_LOADING_HTML;
+    container.style.display = 'block';
     document.getElementById('qrCodeImage').style.display = 'none';
     document.getElementById('statusText').textContent = '正在生成二维码，请耐心等待...';
     document.getElementById('statusSpinner').style.display = 'none';
 
-    // 隐藏验证容器
-    const verificationContainer = document.getElementById('verificationContainer');
-    if (verificationContainer) {
-    verificationContainer.style.display = 'none';
-    }
 }
 
 // 显示二维码图片
@@ -15283,43 +15627,120 @@ function showQRCodeImage(qrCodeUrl) {
 
 // 显示二维码错误
 function showQRCodeError(message) {
-    document.getElementById('qrCodeContainer').innerHTML = `
+    const container = document.getElementById('qrCodeContainer');
+    container.innerHTML = `
     <div class="text-danger">
         <i class="bi bi-exclamation-triangle fs-1 mb-3"></i>
-        <p>${message}</p>
+        <p>${escapeHtml(String(message || '二维码不可用，请重新生成'))}</p>
     </div>
     `;
+    container.style.display = 'block';
     document.getElementById('qrCodeImage').style.display = 'none';
-    document.getElementById('statusText').textContent = '生成失败';
+    document.getElementById('statusText').textContent = '二维码不可用，请重新生成';
     document.getElementById('statusSpinner').style.display = 'none';
+    setQRCodeRefreshBusy(false);
 }
 
 // 开始检查二维码状态
 function startQRCodeCheck() {
-    if (qrCodeCheckInterval) {
-    clearInterval(qrCodeCheckInterval);
+    if (qrCodeVerificationState.checkTimer) {
+    clearInterval(qrCodeVerificationState.checkTimer);
     }
 
     document.getElementById('statusSpinner').style.display = 'inline-block';
     document.getElementById('statusText').textContent = '等待扫码...';
 
-    qrCodeCheckInterval = setInterval(checkQRCodeStatus, 2000); // 每2秒检查一次
+    qrCodeVerificationState.checkTimer = setInterval(checkQRCodeStatus, 2000); // 每2秒检查一次
+}
+
+async function handoffQrToManualVerification(data, requestSessionId) {
+    qrCodeVerificationState.handoffFailure = null;
+    const directVerificationRequired = Boolean(
+        data?.verification_required === true
+        || data?.status === 'verification_required'
+        || data?.state === 'verification_required'
+    );
+    if ((!qrCodeVerificationState.authProgressObserved && !directVerificationRequired) || !qrLoginTargetAccountId) {
+        qrCodeVerificationState.handoffFailure = { kind: 'pending', message: '请先完成本次二维码扫码' };
+        return false;
+    }
+    const failurePriority = { pending: 0, network: 1, timeout: 2, remote: 3, stale: 4 };
+    const mergeFailure = (current, next) => {
+        if (!next) return current;
+        if (!current) return next;
+        return (failurePriority[next.kind] ?? 0) > (failurePriority[current.kind] ?? 0)
+            ? next
+            : current;
+    };
+    const accountId = qrLoginTargetAccountId;
+    for (let attempt = 0; attempt < QR_HANDOFF_RETRY_LIMIT; attempt += 1) {
+        if (
+            requestSessionId !== qrCodeVerificationState.activeSessionId
+            || qrCodeVerificationState.completed
+        ) {
+            qrCodeVerificationState.handoffFailure = { kind: 'stale', message: '二维码会话已切换，请重新生成二维码' };
+            return false;
+        }
+        const runtimeResult = await loadQrManualVerificationRuntime(accountId, {
+            allowStaleEnteredAt: true,
+        });
+        const wrappedRuntimeResult = Boolean(
+            runtimeResult
+            && Object.prototype.hasOwnProperty.call(runtimeResult, 'runtime'),
+        );
+        const runtimeStatus = wrappedRuntimeResult ? runtimeResult.runtime : runtimeResult;
+        const runtimeFailure = wrappedRuntimeResult ? runtimeResult.failure : null;
+        if (runtimeStatus) {
+            let remoteError = '';
+            const started = await startManualVerification(accountId, {
+                deferModal: true,
+                qrSessionId: requestSessionId,
+                verificationRequired: directVerificationRequired,
+                beforeOpen: hideQrModalForManualVerification,
+                onError: message => { remoteError = String(message || ''); },
+            });
+            if (started) {
+                qrCodeVerificationState.completed = true;
+                clearQRCodeCheck({ preserveState: true });
+                showToast(data.message || '扫码后需要人工验证，请在验证窗口中完成操作', 'warning');
+                loadCookies();
+                return true;
+            }
+            qrCodeVerificationState.handoffFailure = mergeFailure(qrCodeVerificationState.handoffFailure, {
+                kind: 'remote',
+                message: remoteError || '远程验证入口暂时不可用，请稍后重试',
+            });
+        } else {
+            qrCodeVerificationState.handoffFailure = mergeFailure(qrCodeVerificationState.handoffFailure, runtimeFailure || {
+                kind: 'pending',
+                message: '人工验证窗口正在准备，请稍候',
+            });
+            if (runtimeFailure?.kind === 'timeout') {
+                return false;
+            }
+        }
+        if (attempt < QR_HANDOFF_RETRY_LIMIT - 1) {
+            document.getElementById('statusText').textContent =
+                `正在准备人工验证窗口（${attempt + 1}/${QR_HANDOFF_RETRY_LIMIT}）...`;
+            await new Promise(resolve => {
+                if (typeof setTimeout === 'function') setTimeout(resolve, QR_HANDOFF_RETRY_DELAY_MS);
+                else resolve();
+            });
+        }
+    }
+    return false;
 }
 
 // 检查二维码状态
 async function checkQRCodeStatus() {
-    if (!qrCodeSessionId || qrCodeVerificationState.inFlight || qrCodeVerificationState.completed) return;
+    if (!qrCodeVerificationState.sessionId || qrCodeVerificationState.inFlight || qrCodeVerificationState.completed) return;
 
-    const requestSessionId = qrCodeSessionId;
+    const requestSessionId = qrCodeVerificationState.sessionId;
     qrCodeVerificationState.inFlight = true;
 
     try {
     const endpoints = getQRLoginEndpoints();
-    const response = await fetch(`${endpoints.checkPrefix}${requestSessionId}`, {
-        headers: {
-        'Authorization': `Bearer ${authToken}`
-        }
-    });
+    const response = await authenticatedFetch(`${endpoints.checkPrefix}${requestSessionId}`);
 
     if (requestSessionId !== qrCodeVerificationState.activeSessionId || qrCodeVerificationState.completed) {
         return;
@@ -15332,47 +15753,73 @@ async function checkQRCodeStatus() {
         return;
         }
 
-        switch (data.status) {
+        const qrStatus = data.verification_required === true
+            ? 'verification_required'
+            : data.status;
+        switch (qrStatus) {
         case 'waiting':
             document.getElementById('statusText').textContent = '等待扫码...';
             break;
         case 'scanned':
+            qrCodeVerificationState.authProgressObserved = true;
             document.getElementById('statusText').textContent = '已扫码，请在手机上确认...';
             break;
         case 'confirmed':
+            qrCodeVerificationState.authProgressObserved = true;
             document.getElementById('statusText').textContent = '已确认，正在获取Cookie...';
             break;
         case 'success':
             qrCodeVerificationState.completed = true;
             document.getElementById('statusText').textContent = '登录成功！';
             document.getElementById('statusSpinner').style.display = 'none';
-            clearQRCodeCheck();
+            clearQRCodeCheck({ preserveState: true });
             handleQRCodeSuccess(data);
             break;
         case 'error':
             qrCodeVerificationState.completed = true;
-            document.getElementById('statusText').textContent = '登录失败';
-            document.getElementById('statusSpinner').style.display = 'none';
-            clearQRCodeCheck();
-            showToast(data.message || '扫码登录失败', 'danger');
+            clearQRCodeCheck({ preserveState: true });
+            showQRCodeError(data.message || '扫码登录失败，请重新生成二维码');
+            showToast(data.message || '扫码登录失败，请重新生成二维码', 'danger');
             break;
         case 'expired':
+            qrCodeVerificationState.completed = true;
             document.getElementById('statusText').textContent = '二维码已过期';
             document.getElementById('statusSpinner').style.display = 'none';
-            clearQRCodeCheck();
+            clearQRCodeCheck({ preserveState: true });
             showQRCodeError('二维码已过期，请刷新重试');
             break;
         case 'cancelled':
-            document.getElementById('statusText').textContent = '用户取消登录';
-            document.getElementById('statusSpinner').style.display = 'none';
-            clearQRCodeCheck();
+            qrCodeVerificationState.completed = true;
+            clearQRCodeCheck({ preserveState: true });
+            showQRCodeError('用户已取消登录，请重新生成二维码');
             break;
         case 'verification_required':
-            document.getElementById('statusText').textContent = '需要闲鱼验证，系统正在等待验证完成...';
-            document.getElementById('statusSpinner').style.display = 'inline-block';
-            showVerificationRequired(data);
+            if (qrLoginTargetAccountId) {
+                const handedOff = await handoffQrToManualVerification(data, requestSessionId);
+                if (!handedOff) {
+                    const failure = getQrHandoffFailure() || {
+                        kind: 'pending',
+                        message: '人工验证窗口仍在准备，请重新生成二维码',
+                    };
+                    qrCodeVerificationState.completed = true;
+                    clearQRCodeCheck({ preserveState: true });
+                    showQRCodeError(failure.message);
+                    if (failure.kind !== 'remote') {
+                        showToast(
+                            failure.message,
+                            failure.kind === 'timeout' ? 'warning' : 'danger',
+                        );
+                    }
+                }
+            } else {
+                qrCodeVerificationState.completed = true;
+                clearQRCodeCheck({ preserveState: true });
+                showQRCodeError('当前扫码需要人工验证，请在账号管理中打开“实时验证”');
+                showToast('当前扫码需要人工验证，请从账号管理打开实时验证', 'warning');
+            }
             break;
         case 'processing':
+            qrCodeVerificationState.authProgressObserved = true;
             document.getElementById('statusText').textContent = '正在处理中...';
             // 继续轮询，不清理检查
             break;
@@ -15380,123 +15827,42 @@ async function checkQRCodeStatus() {
             qrCodeVerificationState.completed = true;
             document.getElementById('statusText').textContent = '登录已完成';
             document.getElementById('statusSpinner').style.display = 'none';
-            clearQRCodeCheck();
+            clearQRCodeCheck({ preserveState: true });
             handleQRCodeSuccess(data);
             break;
+        default:
+            document.getElementById('statusText').textContent = '正在等待扫码状态更新...';
+            break;
         }
+        qrCodeVerificationState.pollFailureCount = 0;
+    } else {
+        const errorData = await response.json().catch(() => ({}));
+        const expired = response.status === 404 || response.status === 410;
+        const message = expired
+            ? '二维码会话已失效，请重新生成二维码'
+            : (typeof errorData.detail === 'string'
+                ? errorData.detail
+                : '二维码状态检查失败，请重新生成二维码');
+        qrCodeVerificationState.completed = true;
+        clearQRCodeCheck({ preserveState: true });
+        showQRCodeError(message);
+        showToast(message, expired ? 'warning' : 'danger');
     }
     } catch (error) {
     console.error('检查二维码状态失败:', error);
+    if (requestSessionId === qrCodeVerificationState.activeSessionId && !qrCodeVerificationState.completed) {
+        qrCodeVerificationState.pollFailureCount += 1;
+        if (qrCodeVerificationState.pollFailureCount >= 3) {
+            qrCodeVerificationState.completed = true;
+            clearQRCodeCheck({ preserveState: true });
+            showQRCodeError('网络不稳定，二维码状态检查失败，请重新生成二维码');
+            showToast('二维码状态检查失败，请重新生成二维码', 'danger');
+        } else {
+            document.getElementById('statusText').textContent = `状态检查暂时失败，正在重试（${qrCodeVerificationState.pollFailureCount}/3）...`;
+        }
+    }
     } finally {
     qrCodeVerificationState.inFlight = false;
-    }
-}
-
-// 显示需要验证的提示
-function showVerificationRequired(data) {
-    const screenshotPath = data.screenshot_path || '';
-    const verificationUrl = data.verification_url || '';
-    const renderKey = `${screenshotPath}|${verificationUrl}`;
-    if (qrCodeVerificationState.renderKey === renderKey && renderKey) {
-    return;
-    }
-    qrCodeVerificationState.renderKey = renderKey;
-
-    // 隐藏二维码区域
-    document.getElementById('qrCodeContainer').style.display = 'none';
-    document.getElementById('qrCodeImage').style.display = 'none';
-
-    let verificationHtml = `
-        <div class="text-center">
-        <div class="mb-4">
-            <i class="bi bi-shield-exclamation text-warning" style="font-size: 4rem;"></i>
-        </div>
-        <h5 class="text-warning mb-3">账号需要闲鱼验证</h5>
-        <div class="alert alert-warning border-0 mb-4">
-            <i class="bi bi-info-circle me-2"></i>
-            <strong>检测到账号存在风控，系统已在服务端保持原始会话并等待验证完成</strong>
-        </div>
-        <div class="alert alert-info border-0">
-            <i class="bi bi-lightbulb me-2"></i>
-            <small>
-            <strong>验证步骤：</strong><br>
-            1. 使用手机闲鱼 APP 扫描下方二维码并完成验证<br>
-            2. 保持当前弹窗打开，系统会自动继续登录流程<br>
-            3. 如果二维码暂未出现，请稍等几秒，页面会自动刷新显示
-            </small>
-        </div>
-        </div>
-    `;
-
-    if (screenshotPath) {
-    verificationHtml = `
-        <div class="text-center">
-        <div class="mb-4">
-            <i class="bi bi-shield-exclamation text-warning" style="font-size: 4rem;"></i>
-        </div>
-        <h5 class="text-warning mb-3">账号需要闲鱼验证</h5>
-        <div class="alert alert-warning border-0 mb-4">
-            <i class="bi bi-info-circle me-2"></i>
-            <strong>检测到账号存在风控，系统已在服务端保持原始会话并生成验证二维码</strong>
-        </div>
-        <div class="mb-4">
-            <p class="text-muted mb-3">请使用手机闲鱼 APP 扫描下方二维码完成验证：</p>
-            <img src="${normalizeStaticAssetPath(screenshotPath)}?t=${Date.now()}" alt="闲鱼验证二维码" class="img-fluid rounded border" style="max-width: 360px; width: 100%; height: auto;">
-        </div>
-        <div class="alert alert-info border-0">
-            <i class="bi bi-lightbulb me-2"></i>
-            <small>
-            <strong>验证步骤：</strong><br>
-            1. 使用手机闲鱼 APP 扫描上方二维码并完成验证<br>
-            2. 保持当前弹窗打开，系统会自动继续登录流程<br>
-            3. 如果二维码失效，请关闭弹窗后重新发起扫码登录
-            </small>
-        </div>
-        </div>
-    `;
-    } else if (verificationUrl) {
-    verificationHtml = `
-        <div class="text-center">
-        <div class="mb-4">
-            <i class="bi bi-shield-exclamation text-warning" style="font-size: 4rem;"></i>
-        </div>
-        <h5 class="text-warning mb-3">账号需要闲鱼验证</h5>
-        <div class="alert alert-warning border-0 mb-4">
-            <i class="bi bi-info-circle me-2"></i>
-            <strong>系统正在准备验证二维码，当前先保留一个兜底链接</strong>
-        </div>
-        <div class="mb-4">
-            <p class="text-muted mb-3">二维码通常会自动出现；如果长时间未出现，可尝试使用兜底入口：</p>
-            <a href="${verificationUrl}" target="_blank" class="btn btn-outline-warning">
-            <i class="bi bi-box-arrow-up-right me-2"></i>
-            打开兜底验证页面
-            </a>
-        </div>
-        <div class="alert alert-info border-0">
-            <i class="bi bi-lightbulb me-2"></i>
-            <small>
-            系统仍会继续尝试在当前会话中生成二维码并自动完成后续登录。
-            </small>
-        </div>
-        </div>
-    `;
-    }
-
-    // 创建验证提示容器
-    let verificationContainer = document.getElementById('verificationContainer');
-    if (!verificationContainer) {
-        verificationContainer = document.createElement('div');
-        verificationContainer.id = 'verificationContainer';
-        document.querySelector('#qrCodeLoginModal .modal-body').appendChild(verificationContainer);
-    }
-
-    verificationContainer.innerHTML = verificationHtml;
-    verificationContainer.style.display = 'block';
-
-    // 显示Toast提示
-    if (!qrCodeVerificationState.toastShown) {
-    showToast('账号需要闲鱼验证，请使用当前页面展示的二维码完成验证', 'warning');
-    qrCodeVerificationState.toastShown = true;
     }
 }
 
@@ -15513,10 +15879,15 @@ function handleQRCodeSuccess(data) {
         task_restarted,
         warning_message
     } = data.account_info;
+    const targetMatched = !qrLoginTargetAccountId || String(account_id) === qrLoginTargetAccountId;
 
     // 构建成功消息
     let successMessage = '';
-    if (is_new_account) {
+    if (!targetMatched) {
+        successMessage = `扫码账号 ${account_id} 与目标账号 ${qrLoginTargetAccountId} 不一致，未执行账号切换。`;
+    } else if (qrLoginTargetAccountId) {
+        successMessage = `账号重新登录成功，四项在线检查已通过！账号ID: ${account_id}`;
+    } else if (is_new_account) {
         successMessage = `新账号添加成功！账号ID: ${account_id}`;
     } else {
         successMessage = `账号Cookie已更新！账号ID: ${account_id}`;
@@ -15535,18 +15906,18 @@ function handleQRCodeSuccess(data) {
                 successMessage += `\n⚠️ ${warning_message}`;
             }
             document.getElementById('statusText').textContent = '登录完成，但账号任务尚未切换';
-            showToast(successMessage, 'warning');
+            showToast(successMessage, targetMatched ? 'warning' : 'danger');
         } else if (token_prewarmed === false) {
             successMessage += '\n✅ 真实Cookie获取并保存成功';
             if (warning_message) {
                 successMessage += `\n⚠️ ${warning_message}`;
             }
             document.getElementById('statusText').textContent = '登录完成，账号任务已切换，Token将在后台继续初始化';
-            showToast(successMessage, 'warning');
+            showToast(successMessage, targetMatched ? 'warning' : 'danger');
         } else {
             successMessage += '\n✅ 真实Cookie获取并保存成功';
             document.getElementById('statusText').textContent = '登录成功！真实Cookie已获取并保存';
-            showToast(successMessage, 'success');
+            showToast(successMessage, targetMatched ? 'success' : 'danger');
         }
     } else if (real_cookie_refreshed === false) {
         successMessage += '\n⚠️ 真实Cookie获取失败，已保存原始扫码Cookie';
@@ -15554,11 +15925,11 @@ function handleQRCodeSuccess(data) {
             successMessage += `\n原因: ${fallback_reason}`;
         }
         document.getElementById('statusText').textContent = '登录成功，但使用原始Cookie';
-        showToast(successMessage, 'warning');
+        showToast(successMessage, targetMatched ? 'warning' : 'danger');
     } else {
         // 兼容旧版本，没有真实cookie刷新信息
         document.getElementById('statusText').textContent = '登录成功！';
-        showToast(successMessage, 'success');
+        showToast(successMessage, targetMatched ? 'success' : 'danger');
     }
 
     closeQRCodeLoginModal(3000);
@@ -15571,19 +15942,28 @@ function handleQRCodeSuccess(data) {
 }
 
 // 清理二维码检查
-function clearQRCodeCheck() {
-    if (qrCodeCheckInterval) {
-    clearInterval(qrCodeCheckInterval);
-    qrCodeCheckInterval = null;
+function stopQRCodeCheck() {
+    if (qrCodeVerificationState.checkTimer) {
+    clearInterval(qrCodeVerificationState.checkTimer);
+    qrCodeVerificationState.checkTimer = null;
     }
-    qrCodeSessionId = null;
-    resetQRCodeVerificationState();
+    qrCodeVerificationState.inFlight = false;
+}
+
+function clearQRCodeCheck(options = {}) {
+    stopQRCodeCheck();
+    qrCodeVerificationState.generation += 1;
+    qrCodeVerificationState.generationInFlight = false;
+    if (!options.preserveState) {
+        resetQRCodeVerificationState();
+    }
+    setQRCodeRefreshBusy(false);
 }
 
 // 刷新二维码
-function refreshQRCode() {
+async function refreshQRCode() {
     clearQRCodeCheck();
-    generateQRCode();
+    return generateQRCode();
 }
 
 // ==================== 图片关键词管理功能 ====================
@@ -20652,7 +21032,7 @@ async function handleItemSearch(event) {
             
             try {
                 checkCount++;
-                const checkResponse = await fetch('/api/captcha/sessions');
+                const checkResponse = await authenticatedFetch('/api/captcha/sessions');
                 const checkData = await checkResponse.json();
                 
                 if (checkData.sessions && checkData.sessions.length > 0) {
@@ -20664,26 +21044,12 @@ async function handleItemSearch(event) {
                                 sessionChecker = null;
                             }
                             
-                            // 确保监控已启动
-                            if (typeof startCaptchaSessionMonitor === 'function') {
-                                startCaptchaSessionMonitor();
-                            }
-                            
-                            // 弹出验证窗口
-                            if (typeof showCaptchaVerificationModal === 'function') {
-                                showCaptchaVerificationModal(session.session_id);
-                                showToast('🎨 检测到滑块验证，请完成验证', 'warning');
-                                
-                                // 停止搜索时的会话检查器，因为已经弹窗了，由弹窗的监控接管
-                                if (sessionChecker) {
-                                    clearInterval(sessionChecker);
-                                    sessionChecker = null;
-                                    console.log('✅ 已弹窗，停止搜索时的会话检查器');
-                                }
+                            const accountId = String(session.account_id || currentCookieId || '').trim();
+                            if (accountId) {
+                                await openRemoteVerificationConsole(accountId);
+                                showToast('检测到滑块验证，请在实时验证窗口中完成操作', 'warning');
                             } else {
-                                // 如果函数未定义，使用备用方案
-                                console.error('showCaptchaVerificationModal 未定义，使用备用方案');
-                                window.location.href = `/api/captcha/control/${session.session_id}`;
+                                showToast('检测到滑块验证，但无法确定所属账号，请从账号管理打开实时验证', 'danger');
                             }
                             return;
                         }
@@ -20703,7 +21069,7 @@ async function handleItemSearch(event) {
         }, 1000); // 每秒检查一次
         
         // 使用 Promise 包装，以便使用 finally
-        const fetchPromise = fetch('/items/search_multiple', {
+        const fetchPromise = authenticatedFetch('/items/search_multiple', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -20737,69 +21103,14 @@ async function handleItemSearch(event) {
                 console.log('检测到需要滑块验证');
                 showSearchStatus(false);
                 
-                // 显示滑块验证模态框
-                const sessionId = data.session_id || 'default';
-                const modal = showCaptchaVerificationModal(sessionId);
-                
-                try {
-                    // 等待用户完成验证
-                    await checkCaptchaCompletion(modal, sessionId);
-                    
-                    // 验证成功，显示搜索状态并重新发起搜索请求
-                    showSearchStatus(true);
-                    document.getElementById('searchProgress').textContent = '验证成功，继续搜索商品...';
-                    
-                    // 重新发起搜索请求
-                    const retryResponse = await fetch('/items/search_multiple', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${token}`
-                        },
-                        body: JSON.stringify({
-                            keyword: keyword,
-                            total_pages: totalPages
-                        })
-                    });
-                    
-                    if (retryResponse.ok) {
-                        const retryData = await retryResponse.json();
-                        
-                        // 再次检查是否需要验证（理论上不应该再需要）
-                        if (retryData.need_captcha || retryData.status === 'need_verification') {
-                            showSearchStatus(false);
-                            showToast('验证后仍需要滑块，请联系管理员', 'danger');
-                            return;
-                        }
-                        
-                        // 处理搜索结果
-                        searchResultsData = retryData.data || [];
-                        console.log('验证后搜索结果:', searchResultsData);
-                        console.log('searchResultsData长度:', searchResultsData.length);
-
-                        searchPageSize = pageSize;
-                        currentSearchPage = 1;
-                        totalSearchPages = Math.ceil(searchResultsData.length / searchPageSize);
-
-                        if (retryData.error) {
-                            showToast(`搜索完成，但遇到问题: ${retryData.error}`, 'warning');
-                        }
-
-                        showSearchStatus(false);
-                        displaySearchResults();
-                        updateSearchStats(retryData);
-                    } else {
-                        const retryError = await retryResponse.json();
-                        showSearchStatus(false);
-                        showToast(`验证后搜索失败: ${retryError.detail || '未知错误'}`, 'danger');
-                        showNoSearchResults();
-                    }
-                } catch (error) {
-                    console.error('滑块验证失败:', error);
-                    showSearchStatus(false);
-                    showToast('滑块验证失败或超时', 'danger');
-                    showNoSearchResults();
+                const accountId = String(data.account_id || currentCookieId || '').trim();
+                if (accountId) {
+                    await openRemoteVerificationConsole(accountId);
+                    showToast('请在实时验证窗口完成操作，然后重新发起搜索', 'warning');
+                } else {
+                    showToast('检测到滑块验证，请从账号管理打开实时验证', 'danger');
                 }
+                showNoSearchResults();
                 return;
             }
 
@@ -21734,354 +22045,6 @@ async function getBenefitsInfo() {
         return null;
     }
 }
-
-// =============================================================================
-// 滑块验证相关函数
-// =============================================================================
-
-// 会话监控相关变量
-let captchaSessionMonitor = null;
-let activeCaptchaModal = null;
-let monitoredSessions = new Set();
-
-// 开始监控验证会话
-function startCaptchaSessionMonitor() {
-    if (captchaSessionMonitor) {
-        console.log('⚠️ 会话监控已在运行中');
-        return; // 已经在监控中
-    }
-    
-    console.log('🔍 开始监控验证会话...');
-    
-    let checkCount = 0;
-    captchaSessionMonitor = setInterval(async () => {
-        try {
-            checkCount++;
-            const response = await fetch('/api/captcha/sessions');
-            const data = await response.json();
-            
-            // 每10次检查输出一次日志
-            if (checkCount % 10 === 0) {
-                console.log(`🔍 监控检查 #${checkCount}: 活跃会话数=${data.count || 0}`);
-            }
-            
-            if (data.sessions && data.sessions.length > 0) {
-                console.log('📋 当前活跃会话:', data.sessions);
-                
-                for (const session of data.sessions) {
-                    // 如果会话已完成或不存在，从监控列表中移除
-                    if (session.completed || !session.has_websocket) {
-                        if (monitoredSessions.has(session.session_id)) {
-                            console.log(`✅ 会话已完成或已关闭: ${session.session_id}`);
-                            monitoredSessions.delete(session.session_id);
-                        }
-                        continue;
-                    }
-                    
-                    // 如果发现新的会话（未完成且未被监控），立即弹出窗口
-                    if (!monitoredSessions.has(session.session_id)) {
-                        console.log(`✨ 检测到新的验证会话: ${session.session_id}`);
-                        monitoredSessions.add(session.session_id);
-                        
-                        // 自动弹出验证窗口
-                        showCaptchaVerificationModal(session.session_id);
-                        showToast('🎨 检测到滑块验证，请完成验证', 'warning');
-                    }
-                }
-            }
-            
-            // 如果没有活跃会话且没有监控中的会话，停止监控
-            if ((!data.sessions || data.sessions.length === 0) && monitoredSessions.size === 0) {
-                console.log('✅ 没有活跃会话且没有监控中的会话，停止全局监控');
-                stopCaptchaSessionMonitor();
-            }
-        } catch (error) {
-            console.error('监控验证会话失败:', error);
-        }
-    }, 1000); // 每秒检查一次
-    
-    console.log('✅ 会话监控已启动');
-}
-
-// 停止监控验证会话
-function stopCaptchaSessionMonitor() {
-    if (captchaSessionMonitor) {
-        clearInterval(captchaSessionMonitor);
-        captchaSessionMonitor = null;
-        monitoredSessions.clear();
-        console.log('⏹️ 停止监控验证会话');
-    }
-}
-
-// 手动测试会话监控（用于调试）
-async function testCaptchaSessionMonitor() {
-    try {
-        console.log('🧪 测试会话监控...');
-        const response = await fetch('/api/captcha/sessions');
-        const data = await response.json();
-        console.log('📊 API响应:', data);
-        return data;
-    } catch (error) {
-        console.error('❌ 测试失败:', error);
-        return null;
-    }
-}
-
-// 手动弹出验证窗口（用于调试）
-function testShowCaptchaModal(sessionId = 'default') {
-    console.log(`🧪 手动弹出验证窗口: ${sessionId}`);
-    showCaptchaVerificationModal(sessionId);
-}
-
-// 暴露到全局，方便调试和使用
-window.testCaptchaSessionMonitor = testCaptchaSessionMonitor;
-window.testShowCaptchaModal = testShowCaptchaModal;
-window.startCaptchaSessionMonitor = startCaptchaSessionMonitor;
-window.stopCaptchaSessionMonitor = stopCaptchaSessionMonitor;
-window.showCaptchaVerificationModal = showCaptchaVerificationModal;
-
-// 显示滑块验证模态框
-function showCaptchaVerificationModal(sessionId = 'default') {
-    // 如果已经有活跃的弹窗，不重复弹出
-    if (activeCaptchaModal) {
-        console.log('已有活跃的验证窗口，不重复弹出');
-        return activeCaptchaModal;
-    }
-    
-    const modal = new bootstrap.Modal(document.getElementById('captchaVerifyModal'), {
-        backdrop: 'static',
-        keyboard: false
-    });
-    const iframe = document.getElementById('captchaIframe');
-    const loadingIndicator = document.getElementById('captchaLoadingIndicator');
-    
-    // 获取服务器地址
-    const serverUrl = window.location.origin;
-    
-    // 重置 iframe
-    iframe.style.display = 'none';
-    loadingIndicator.style.display = 'block';
-    
-    // 设置 iframe 源（嵌入模式）
-    iframe.src = `${serverUrl}/api/captcha/control/${sessionId}?embed=1`;
-    
-    // iframe 加载完成后隐藏加载指示器
-    iframe.onload = function() {
-        loadingIndicator.style.display = 'none';
-        iframe.style.display = 'block';
-    };
-    
-    // 显示模态框
-    modal.show();
-    activeCaptchaModal = modal;
-    
-    // 自动启动验证完成监控
-    startCheckCaptchaCompletion(modal, sessionId);
-    
-    // 监听模态框关闭事件
-    document.getElementById('captchaVerifyModal').addEventListener('hidden.bs.modal', () => {
-        activeCaptchaModal = null;
-        // 从监控列表中移除
-        monitoredSessions.delete(sessionId);
-        
-        // 如果没有其他监控中的会话，停止全局监控
-        if (monitoredSessions.size === 0) {
-            stopCaptchaSessionMonitor();
-            console.log('✅ 弹窗关闭，已停止全局监控');
-        }
-    }, { once: true });
-    
-    // 返回 modal 实例用于后续控制
-    return modal;
-}
-
-// 启动验证完成监控（自动模式）
-function startCheckCaptchaCompletion(modal, sessionId) {
-    let checkInterval = null;
-    let isClosed = false;
-    
-    const closeModal = () => {
-        if (isClosed) return;
-        isClosed = true;
-        
-        if (checkInterval) {
-            clearInterval(checkInterval);
-            checkInterval = null;
-        }
-        
-        // 从监控列表中移除
-        monitoredSessions.delete(sessionId);
-        
-        // 如果没有其他监控中的会话，停止全局监控
-        if (monitoredSessions.size === 0) {
-            stopCaptchaSessionMonitor();
-            console.log('✅ 所有验证已完成，已停止全局监控');
-        }
-        
-        modal.hide();
-        activeCaptchaModal = null;
-        showToast('✅ 滑块验证成功！', 'success');
-        console.log(`✅ 验证完成: ${sessionId}`);
-    };
-    
-    checkInterval = setInterval(async () => {
-        try {
-            const response = await fetch(`/api/captcha/status/${sessionId}`);
-            const data = await response.json();
-            
-            console.log(`检查验证状态: ${sessionId}`, data);
-            
-            // 如果验证完成，或者会话不存在（已关闭），都视为完成
-            if (data.completed || (data.session_exists === false && data.success)) {
-                closeModal();
-                return;
-            }
-        } catch (error) {
-            console.error('检查验证状态失败:', error);
-            // 如果API调用失败，可能是会话已关闭，也视为完成
-            if (error.message && error.message.includes('404')) {
-                closeModal();
-            }
-        }
-    }, 1000); // 每秒检查一次
-    
-    // 5分钟超时
-    setTimeout(() => {
-        if (!isClosed && checkInterval) {
-            clearInterval(checkInterval);
-            checkInterval = null;
-            if (activeCaptchaModal) {
-                modal.hide();
-                activeCaptchaModal = null;
-                showToast('❌ 验证超时，请重试', 'danger');
-            }
-        }
-    }, 300000);
-    
-    // 模态框关闭时停止检查
-    document.getElementById('captchaVerifyModal').addEventListener('hidden.bs.modal', () => {
-        if (checkInterval) {
-            clearInterval(checkInterval);
-            checkInterval = null;
-        }
-        isClosed = true;
-    }, { once: true });
-}
-
-// 检查验证是否完成（Promise模式，兼容旧代码）
-async function checkCaptchaCompletion(modal, sessionId) {
-    return new Promise((resolve, reject) => {
-        const checkInterval = setInterval(async () => {
-            try {
-                const response = await fetch(`/api/captcha/status/${sessionId}`);
-                const data = await response.json();
-                
-                if (data.completed) {
-                    clearInterval(checkInterval);
-                    resolve(true);
-                }
-            } catch (error) {
-                console.error('检查验证状态失败:', error);
-            }
-        }, 1000);
-        
-        setTimeout(() => {
-            clearInterval(checkInterval);
-            reject(new Error('验证超时'));
-        }, 300000);
-        
-        document.getElementById('captchaVerifyModal').addEventListener('hidden.bs.modal', () => {
-            clearInterval(checkInterval);
-        }, { once: true });
-    });
-}
-
-// ========================= 验证截图相关功能 =========================
-
-// 显示验证截图
-async function showFaceVerification(accountId) {
-    try {
-        toggleLoading(true);
-        
-        // 获取该账号的验证截图
-        const response = await fetch(`${apiBase}/face-verification/screenshot/${accountId}`, {
-            headers: {
-                'Authorization': `Bearer ${authToken}`
-            }
-        });
-        
-        if (!response.ok) {
-            throw new Error('获取验证截图失败');
-        }
-        
-        const data = await response.json();
-        
-        toggleLoading(false);
-        
-        if (!data.success) {
-            showToast(data.message || '未找到验证截图', 'warning');
-            return;
-        }
-        
-        // 使用与密码登录相同的弹窗显示验证截图
-        showAccountFaceVerificationModal(accountId, data.screenshot);
-        
-    } catch (error) {
-        toggleLoading(false);
-        console.error('获取验证截图失败:', error);
-        showToast('获取验证截图失败: ' + error.message, 'danger');
-    }
-}
-
-// 显示账号列表的验证截图弹窗（使用与密码登录相同的样式）
-function showAccountFaceVerificationModal(accountId, screenshot) {
-    // 复用密码登录的弹窗
-    let modal = document.getElementById('passwordLoginQRModal');
-    if (!modal) {
-        createPasswordLoginQRModal();
-        modal = document.getElementById('passwordLoginQRModal');
-    }
-    
-    // 更新模态框标题
-    const modalTitle = document.getElementById('passwordLoginQRModalLabel');
-    if (modalTitle) {
-        modalTitle.innerHTML = `<i class="bi bi-shield-exclamation text-warning me-2"></i>账号验证 - 账号 ${accountId}`;
-    }
-    
-    // 显示截图
-    const screenshotImg = document.getElementById('passwordLoginScreenshotImg');
-    const linkButton = document.getElementById('passwordLoginVerificationLink');
-    const statusText = document.getElementById('passwordLoginQRStatusText');
-    
-    if (screenshotImg) {
-        screenshotImg.src = `${screenshot.path}?t=${new Date().getTime()}`;
-        screenshotImg.style.display = 'block';
-        screenshotImg.alt = '验证截图';
-    }
-    
-    // 隐藏链接按钮
-    if (linkButton) {
-        linkButton.style.display = 'none';
-    }
-    
-    // 更新状态文本
-    if (statusText) {
-        statusText.innerHTML = `请根据下方验证截图在手机闲鱼APP中完成验证<br><small class="text-muted">创建时间: ${screenshot.created_time_str}</small>`;
-    }
-    
-    // 获取或创建模态框实例
-    let modalInstance = bootstrap.Modal.getInstance(modal);
-    if (!modalInstance) {
-        modalInstance = new bootstrap.Modal(modal);
-    }
-    
-    // 显示弹窗
-    modalInstance.show();
-    
-    // 注意：截图删除由后端在验证完成或失败时自动处理，前端不需要手动删除
-}
-
-// 注：人脸验证弹窗已复用密码登录的 passwordLoginQRModal，不再需要单独的弹窗
 
 /**
  * 显示版本信息弹窗

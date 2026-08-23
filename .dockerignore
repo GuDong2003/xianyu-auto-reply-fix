@@ -76,9 +76,14 @@ docs/
 # Docker相关（保留必要的构建文件）
 .dockerignore.bak
 docker-compose.override.yml
+deploy/*
+!deploy/entrypoint.production.sh
+!deploy/novnc.SHA256SUMS
+!deploy/run-remote-verification-pointer-e2e.sh
+!deploy/remote_verification_pointer_e2e.py
 
-# 配置文件（运行时挂载）
-# global_config.yml
+# 配置文件（生产环境运行时挂载，禁止进入镜像层）
+global_config.yml
 
 # 环境变量文件
 .env
@@ -88,7 +93,6 @@ docker-compose.override.yml
 *.dev.yml
 *.test.yml
 config.*.yml
-!global_config.yml
 
 # 前端相关
 node_modules/
@@ -146,6 +150,7 @@ credentials/
 *.pid
 *.sock
 *.lock
+!uv.lock
 *.port
 
 # 性能分析文件
@@ -361,3 +366,9 @@ ENV/
 # order_status_handler.py - 保留，是核心订单处理模块
 php/
 # simple_stats_server.py - 保留，是可选的统计服务器
+
+# Production connector build caches and local secrets
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+deploy/secrets/

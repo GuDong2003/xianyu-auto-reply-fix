@@ -1,0 +1,32 @@
+.remote-verification-console-modal .modal-dialog {
+  max-width: min(1280px, calc(100vw - 2rem));
+}
+
+.remote-verification-console-modal .modal-content {
+  background: #101820;
+  color: #eff6f8;
+  border: 1px solid #31434b;
+}
+
+.remote-verification-console-modal .modal-header,
+.remote-verification-console-modal .modal-footer {
+  border-color: #31434b;
+}
+
+.remote-verification-console-modal .modal-body {
+  padding: 0.9rem;
+}
+
+.remote-verification-console-status {
+  min-height: 1.5rem;
+  margin: 0 0 0.75rem;
+  color: #b9cbd1;
+}
+
+.remote-verification-console-modal iframe {
+  display: block;
+  width: 100%;
+  min-height: min(72vh, 760px);
+  border: 1px solid #3d535d;
+  background: #0a0f12;
+}

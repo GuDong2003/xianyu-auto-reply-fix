@@ -1551,7 +1551,8 @@ Cookie数量: {cookie_count}
 
             if not admin_exists:
                 # 首次创建admin用户，设置默认密码和管理员权限
-                default_password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+                initial_password = os.getenv("ADMIN_PASSWORD", "admin123")
+                default_password_hash = hashlib.sha256(initial_password.encode()).hexdigest()
                 # 检查is_admin列是否存在
                 try:
                     cursor.execute('SELECT is_admin FROM users LIMIT 1')

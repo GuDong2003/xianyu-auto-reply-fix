@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+
+readonly connector_ip=172.31.203.2
+readonly connector_network=172.31.203.0/28
+readonly policy_table=203
+readonly internal_rule_priority=1100
+readonly egress_rule_priority=1110
+readonly tunnel_interface=wg-hz
+readonly nft_rules=/etc/xianyu-egress/xianyu-egress-policy.nft
+
+rule_exists() {
+    priority=$1
+    pattern=$2
+    ip rule show | grep -Eq "^${priority}:.*${pattern}"
+}
+
+add_policy_rules() {
+    rule_exists "$internal_rule_priority" "from ${connector_ip} to ${connector_network} lookup main" ||
+        ip rule add pref "$internal_rule_priority" from "$connector_ip/32" to "$connector_network" lookup main
+    rule_exists "$egress_rule_priority" "from ${connector_ip} lookup ${policy_table}" ||
+        ip rule add pref "$egress_rule_priority" from "$connector_ip/32" lookup "$policy_table"
+}
+
+ensure_mss_clamp() {
+    nft list chain ip xianyu_egress forward | grep -q 'maxseg size set 1340' ||
+        nft insert rule ip xianyu_egress forward \
+            ip saddr "$connector_ip" oifname "$tunnel_interface" \
+            tcp flags syn tcp option maxseg size set 1340
+}
+
+apply_policy() {
+    nft list table ip xianyu_egress >/dev/null 2>&1 || nft -f "$nft_rules"
+    ensure_mss_clamp
+    ip route replace blackhole default table "$policy_table" metric 32767
+    if ip link show dev "$tunnel_interface" >/dev/null 2>&1; then
+        ip route replace default dev "$tunnel_interface" table "$policy_table" metric 10
+    fi
+    add_policy_rules
+}
+
+delete_rule_priority() {
+    priority=$1
+    while ip rule del pref "$priority" >/dev/null 2>&1; do :; done
+}
+
+remove_policy() {
+    delete_rule_priority "$egress_rule_priority"
+    delete_rule_priority "$internal_rule_priority"
+    ip route flush table "$policy_table" >/dev/null 2>&1 || true
+    nft delete table ip xianyu_egress >/dev/null 2>&1 || true
+}
+
+check_policy() {
+    nft list table ip xianyu_egress >/dev/null
+    nft list chain ip xianyu_egress forward | grep -q 'maxseg size set 1340'
+    ip route show table "$policy_table" | grep -q '^blackhole default'
+    ip route show table "$policy_table" | grep -q "^default dev ${tunnel_interface}"
+    rule_exists "$internal_rule_priority" "from ${connector_ip} to ${connector_network} lookup main"
+    rule_exists "$egress_rule_priority" "from ${connector_ip} lookup ${policy_table}"
+}
+
+case "${1:-}" in
+    apply) apply_policy ;;
+    remove) remove_policy ;;
+    check) check_policy ;;
+    *) echo "usage: $0 apply|remove|check" >&2; exit 2 ;;
+esac

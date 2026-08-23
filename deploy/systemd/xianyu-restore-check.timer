@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify a Xianyu backup restore every month
+
+[Timer]
+OnCalendar=monthly
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

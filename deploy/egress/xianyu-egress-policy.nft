@@ -1,0 +1,16 @@
+table ip xianyu_egress {
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+
+        ip saddr 172.31.203.2 oifname "wg-hz" tcp flags syn tcp option maxseg size set 1340
+        ip saddr 172.31.203.2 ip daddr 172.31.203.0/28 accept
+        ip saddr 172.31.203.2 oifname "wg-hz" accept
+        ip saddr 172.31.203.2 reject with icmp type admin-prohibited
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority 99; policy accept;
+
+        ip saddr 172.31.203.2 oifname "wg-hz" snat to 10.203.0.1
+    }
+}

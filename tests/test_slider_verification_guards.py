@@ -9,7 +9,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from utils.xianyu_slider_stealth import XianyuSliderStealth
+from utils.xianyu_slider_stealth import XianyuSliderStealth  # noqa: E402
 
 
 class _FakeElement:
@@ -295,7 +295,7 @@ class SliderVerificationGuardsTest(unittest.TestCase):
         }
         slider = self._make_slider(page)
         slider.last_login_error = ""
-        slider._snapshot_context_cookies = lambda _context, page=None: dict(cookies_missing_cna)
+        slider._snapshot_context_cookies = lambda _context, page=None, **_kwargs: dict(cookies_missing_cna)
         slider._stabilize_logged_in_context_cookies = lambda _context, _page, scene=None: dict(cookies_missing_cna)
         def _warmup(_context, _page, scene=None, initial_cookies=None):
             slider.last_browser_cookie_warmup_session_unready = True
@@ -539,7 +539,7 @@ class SliderVerificationGuardsTest(unittest.TestCase):
                 }
             )
 
-            with open(slider.success_history_file, "r", encoding="utf-8") as handle:
+            with open(slider.success_history_file, encoding="utf-8") as handle:
                 saved = json.load(handle)
 
         self.assertEqual(saved[0]["trigger_scene"], "token_refresh")

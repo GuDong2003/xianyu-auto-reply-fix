@@ -1,0 +1,9 @@
+[Unit]
+Description=Xianyu monthly backup restore verification
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/xianyu/releases/current
+ExecStart=/usr/bin/docker compose --env-file /opt/xianyu-production/production.env -f /opt/xianyu/releases/current/compose.production.yml --profile ops run --rm xianyu-restore-check

@@ -147,6 +147,20 @@ except Exception as e:
 def _check_and_install_playwright():
     """检查Playwright浏览器是否存在，如果不存在则自动安装"""
     print("检查Playwright浏览器...")
+
+    if os.getenv("XIANYU_PRODUCTION", "").strip().lower() == "true":
+        from xianyu_control.browser_runtime import (
+            ProductionBrowserUnavailable,
+            resolve_production_chromium_executable,
+        )
+
+        try:
+            executable = resolve_production_chromium_executable()
+        except ProductionBrowserUnavailable as exc:
+            print(f"{_WARN} {exc}")
+            return False
+        print(f"{_OK} 找到生产镜像内的Playwright浏览器: {executable}")
+        return True
     
     # 检查是否安装了playwright模块
     try:
@@ -442,6 +456,21 @@ from db_manager import db_manager
 from file_log_collector import setup_file_logging
 
 
+def _apply_production_security() -> None:
+    if os.getenv('XIANYU_PRODUCTION', 'false').lower() != 'true':
+        return
+    admin_password = os.getenv('ADMIN_PASSWORD', '')
+    jwt_secret = os.getenv('JWT_SECRET_KEY', '')
+    if len(admin_password) < 16 or admin_password == 'admin123':
+        raise RuntimeError('生产环境 ADMIN_PASSWORD 必须至少 16 位且不能使用默认值')
+    if len(jwt_secret) < 32 or jwt_secret == 'default-secret-key':
+        raise RuntimeError('生产环境 JWT_SECRET_KEY 必须至少 32 位且不能使用默认值')
+    if db_manager.verify_user_password('admin', 'admin123'):
+        if not db_manager.update_user_password('admin', admin_password):
+            raise RuntimeError('默认管理员密码轮换失败')
+        logger.warning('默认管理员密码已在生产启动时完成轮换')
+
+
 def _start_api_server():
     """后台线程启动 FastAPI 服务"""
     api_conf = AUTO_REPLY.get('api', {})
@@ -524,10 +553,12 @@ async def main():
     cm.manager = cm.CookieManager(loop)
     manager = cm.manager
     print("CookieManager 创建完成")
+    _apply_production_security()
+    external_connector = os.getenv('XIANYU_EXTERNAL_CONNECTOR', 'false').lower() == 'true'
 
     # 1) 从数据库加载的 Cookie 已经在 CookieManager 初始化时完成
     # 为每个启用的 Cookie 启动任务
-    for cid, val in manager.cookies.items():
+    for cid, val in (() if external_connector else manager.cookies.items()):
         # 检查账号是否启用
         if not manager.get_cookie_status(cid):
             logger.info(f"跳过禁用的 Cookie: {cid}")
@@ -568,6 +599,9 @@ async def main():
     if env_cookie and 'default' not in manager.list_cookies():
         manager.add_cookie('default', env_cookie)
         logger.info("从环境变量加载 default Cookie")
+
+    if external_connector:
+        logger.info("独立连接器模式已启用，控制平面不会创建闲鱼 WebSocket 或浏览器任务")
 
     # 启动 API 服务线程
     print("启动 API 服务线程...")

@@ -9,6 +9,7 @@ import argparse
 import json
 import subprocess
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import requests
@@ -61,7 +62,8 @@ def build_initial_session(*, with_tfstk: bool = True, proxies=None) -> requests.
     s.headers.update({'User-Agent': UA, 'Accept-Language': 'zh-CN,zh;q=0.9'})
 
     # 1) cna —— mmstat 链路
-    s.get('https://log.mmstat.com/eg.js', timeout=10)
+    with suppress(requests.RequestException):
+        s.get('https://log.mmstat.com/eg.js', timeout=10)
     cna = s.cookies.get('cna', domain='.mmstat.com')
     if cna:
         s.cookies.set('cna', cna, domain='.goofish.com', path='/')

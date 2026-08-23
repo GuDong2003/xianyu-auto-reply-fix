@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 from pathlib import Path
 
+from xianyu_connector.security.redaction import redact_log_record
+
 class FileLogCollector:
     """基于文件监控的日志收集器"""
     
@@ -31,6 +33,7 @@ class FileLogCollector:
         """设置文件监控"""
         # 查找日志文件
         possible_files = [
+            "logs/realtime.log",
             "xianyu.log",
             "app.log", 
             "system.log",
@@ -45,7 +48,7 @@ class FileLogCollector:
         
         if not self.log_file:
             # 如果没有找到现有文件，创建一个新的
-            self.log_file = "realtime.log"
+            self.log_file = "logs/realtime.log"
             
         # 设置loguru输出到文件
         self.setup_loguru_file_output()
@@ -58,6 +61,8 @@ class FileLogCollector:
         """设置loguru输出到文件"""
         try:
             from loguru import logger
+
+            logger.configure(patcher=redact_log_record)
             
             # 确保logs目录存在
             logs_dir = Path("logs")

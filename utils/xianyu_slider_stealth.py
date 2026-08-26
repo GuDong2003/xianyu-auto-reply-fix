@@ -1025,6 +1025,15 @@ class XianyuSliderStealth:
         self.keep_verification_screenshots = (
             os.environ.get("XY_KEEP_VERIFICATION_SCREENSHOT", "").strip().lower() in {"1", "true", "yes", "on"}
         )
+        manual_slider_wait_timeout_text = os.environ.get("XY_MANUAL_SLIDER_WAIT_TIMEOUT", "").strip()
+        try:
+            self.manual_slider_wait_timeout = (
+                max(30, int(manual_slider_wait_timeout_text))
+                if manual_slider_wait_timeout_text
+                else 900
+            )
+        except ValueError:
+            self.manual_slider_wait_timeout = 900
         self.disable_headless_warmup = (
             os.environ.get("XY_SLIDER_HEADLESS_WARMUP", "").strip().lower() not in {"1", "true", "yes", "on"}
         )
@@ -3587,6 +3596,88 @@ class XianyuSliderStealth:
                 return manual_cookies
             logger.error(f"【{self.pure_user_id}】获取滑块验证成功后的cookie失败: {str(e)}")
             return None
+
+    def _has_visible_slider(self, page=None) -> bool:
+        """Return True when the current page still exposes an Aliyun slider control."""
+        slider_selectors = (
+            '#nc_1_n1z',
+            '.nc-container',
+            '.nc_scale',
+            '.nc-wrapper',
+            '.nc_iconfont',
+            '[class*="nc_"]',
+        )
+        probe_page = page or self.page
+        if not probe_page:
+            return False
+
+        try:
+            frames = [probe_page] + list(getattr(probe_page, 'frames', []) or [])
+        except Exception:
+            frames = [probe_page]
+
+        for frame in frames:
+            for selector in slider_selectors:
+                try:
+                    element = frame.query_selector(selector)
+                    if element and element.is_visible():
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def _wait_for_manual_slider_completion(self, page=None, reason: str = "slider_failed"):
+        """In headful mode, keep the browser open so the user can solve the slider over VNC."""
+        if self.headless:
+            return None
+        if not self.context or not self.page:
+            return None
+
+        timeout = int(getattr(self, 'manual_slider_wait_timeout', 300) or 300)
+        logger.warning(
+            f"【{self.pure_user_id}】有头模式滑块自动处理失败，保留浏览器窗口 {timeout} 秒等待人工处理 "
+            f"(reason={reason})"
+        )
+        logger.warning(
+            f"【{self.pure_user_id}】请通过 VNC 连接 127.0.0.1:5900，在浏览器中手动完成滑块验证"
+        )
+
+        start_time = time.time()
+        next_progress_log = start_time
+        while time.time() - start_time < timeout:
+            try:
+                monitor_page = self._select_monitor_page(self.context, page or self.page) or page or self.page
+                if not monitor_page:
+                    time.sleep(2)
+                    continue
+
+                if self._has_visible_slider(monitor_page):
+                    now = time.time()
+                    if now >= next_progress_log:
+                        remaining = max(0, int(timeout - (now - start_time)))
+                        logger.info(f"【{self.pure_user_id}】等待人工滑块处理中，剩余 {remaining} 秒")
+                        next_progress_log = now + 30
+                    time.sleep(2)
+                    continue
+
+                try:
+                    monitor_page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                time.sleep(1)
+
+                cookies = self._get_cookies_after_success()
+                if cookies:
+                    logger.success(
+                        f"【{self.pure_user_id}】人工滑块处理后已获取 cookie，共 {len(cookies)} 个字段"
+                    )
+                    return cookies
+            except Exception as wait_e:
+                logger.warning(f"【{self.pure_user_id}】等待人工滑块处理时出错: {wait_e}")
+                time.sleep(2)
+
+        logger.warning(f"【{self.pure_user_id}】人工滑块等待超时，继续按滑块失败处理")
+        return None
     
     def _save_cookies_to_file(self, cookies):
         """保存cookie到文件"""
@@ -12857,6 +12948,13 @@ class XianyuSliderStealth:
                             f"按 run() 成功收口"
                         )
                         return True, self._post_recovery_cookies
+                    manual_cookies = self._wait_for_manual_slider_completion(
+                        monitor_page,
+                        reason="run_slider_failed",
+                    )
+                    if manual_cookies:
+                        logger.success(f"【{self.pure_user_id}】人工滑块处理成功，按 run() 成功收口")
+                        return True, manual_cookies
                     self._save_debug_snapshot("run_failed", getattr(self, "_detected_slider_frame", None))
 
                 return success, cookies

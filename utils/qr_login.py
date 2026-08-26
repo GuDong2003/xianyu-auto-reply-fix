@@ -16,7 +16,7 @@ import qrcode
 import qrcode.constants
 from loguru import logger
 import hashlib
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from utils.image_utils import image_manager
 
@@ -122,6 +122,20 @@ class QRLoginManager:
 
         return browser_cookies
 
+    def _collect_client_cookie_dict(self, client: httpx.AsyncClient) -> Dict[str, str]:
+        """Collect all cookies from an httpx client regardless of domain."""
+        cookie_dict = {}
+        try:
+            for cookie in client.cookies.jar:
+                if cookie.name and cookie.value is not None:
+                    cookie_dict[str(cookie.name)] = str(cookie.value)
+        except Exception:
+            try:
+                cookie_dict.update({str(k): str(v) for k, v in client.cookies.items()})
+            except Exception:
+                pass
+        return cookie_dict
+
     def _normalize_cookie_dict(self, cookies: Any) -> Dict[str, str]:
         """将不同形式的Cookie数据统一转换为字典"""
         if isinstance(cookies, dict) or hasattr(cookies, 'items'):
@@ -157,7 +171,7 @@ class QRLoginManager:
             return False
 
         companion_keys = ('cookie2', 'havana_lgc2_77', '_tb_token_', 'sgcookie')
-        return any(cookie_dict.get(key) for key in companion_keys)
+        return all(cookie_dict.get(key) for key in companion_keys)
 
     def _is_logged_in_url(self, url: str) -> bool:
         """判断URL是否已经跳转到登录后的页面"""
@@ -519,6 +533,12 @@ class QRLoginManager:
                     # 获取二维码内容
                     qr_content = results["content"]["data"]["codeContent"]
                     session.qr_content = qr_content
+                    generated_login_token = (
+                        results["content"]["data"].get("lgToken")
+                        or parse_qs(urlparse(qr_content).query).get("lgToken", [None])[0]
+                    )
+                    if generated_login_token:
+                        session.params["_generated_login_token"] = generated_login_token
 
                     # 生成二维码图片（base64格式）
                     qr = qrcode.QRCode(
@@ -582,6 +602,60 @@ class QRLoginManager:
             )
             return resp
 
+    async def _complete_qrcode_token_login(self, session: QRLoginSession, login_token: str) -> bool:
+        """二维码确认后用 login token 完整收口登录态，补齐 havana 等会话 Cookie。"""
+        if not login_token:
+            return False
+
+        device_id = session.cookies.get('cna') or session.params.get('deviceId') or ''
+        headers = {
+            **self.headers,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Referer': f'{self.host}/mini_login.htm',
+            'Origin': self.host,
+        }
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=self.timeout, proxy=self.proxy) as client:
+                client.cookies.update(session.cookies)
+                login_resp = await client.post(
+                    f"{self.host}/login_token/login.do",
+                    params={
+                        'token': login_token,
+                        'subFlow': 'DIALOG_CHECK_LOGIN_RPC',
+                        'nextCode': '0018',
+                        'bizScene': 'qrcode',
+                        'confirm': 'true',
+                    },
+                    data={'deviceId': device_id},
+                    headers=headers,
+                )
+                self._merge_session_cookies(session, login_resp.cookies)
+                self._merge_session_cookies(session, self._collect_client_cookie_dict(client))
+                logger.info(
+                    f"扫码登录token收口完成: status={login_resp.status_code}, "
+                    f"havana={'有' if session.cookies.get('havana_lgc2_77') else '无'}"
+                )
+
+                # 访问一次闲鱼页面，触发登录态 Cookie 在 goofish 域稳定落盘。
+                try:
+                    await client.get(
+                        'https://www.goofish.com/im',
+                        headers={
+                            **self.headers,
+                            'Referer': 'https://www.goofish.com/',
+                            'Origin': 'https://www.goofish.com',
+                        },
+                    )
+                    self._merge_session_cookies(session, self._collect_client_cookie_dict(client))
+                except Exception as warm_e:
+                    logger.warning(f"扫码登录token收口后的页面预热失败，继续使用当前Cookie: {warm_e}")
+
+            return self._has_completed_login_cookies(session.cookies)
+        except Exception as e:
+            logger.error(f"扫码登录token收口失败: {e}")
+            return False
+
     async def _monitor_qr_status(self, session_id: str):
         """监控二维码状态"""
         try:
@@ -641,8 +715,22 @@ class QRLoginManager:
                             await asyncio.sleep(0.8)
                             continue
                         else:
-                            # 登录成功
-                            if self._mark_session_success(session, resp.cookies, 'api'):
+                            self._merge_session_cookies(session, resp.cookies)
+                            qdata = resp.json().get("content", {}).get("data", {}) or {}
+                            login_token = (
+                                qdata.get("token")
+                                or qdata.get("lgToken")
+                                or session.params.get("_generated_login_token")
+                            )
+                            if login_token:
+                                await self._complete_qrcode_token_login(session, login_token)
+                            else:
+                                logger.warning(f"扫码登录API返回成功状态，但没有login token: {session_id}")
+
+                            # 扫码确认后先把已拿到的 Cookie 交给后续真实 Cookie 刷新流程处理。
+                            # 部分账号不会在 qrcode query/login_token 链路里直接返回 havana_lgc2_77，
+                            # 如果这里强制要求全量 Cookie，前端会误报二维码过期/生成失败。
+                            if self._mark_session_success(session, session.cookies, 'api', require_complete_cookies=False):
                                 break
                             logger.warning(f"扫码登录API返回成功状态，但关键Cookie不足: {session_id}")
 

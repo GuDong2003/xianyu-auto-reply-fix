@@ -26,7 +26,7 @@ import json
 import sys
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 from loguru import logger
@@ -198,6 +198,11 @@ def qrcode_login_lite(
     if not (qr_url and qr_t and qr_ck):
         raise RuntimeError(f"生成二维码失败: {gen_resp}")
 
+    generated_login_token = (
+        gen_data.get("lgToken")
+        or parse_qs(urlparse(qr_url).query).get("lgToken", [None])[0]
+    )
+
     logger.info(f"获取到登录二维码: {qr_url}")
     if on_qr_url is not None:
         try:
@@ -232,7 +237,7 @@ def qrcode_login_lite(
     }
 
     deadline = time.time() + timeout
-    login_token: Optional[str] = None
+    login_token: Optional[str] = generated_login_token
     last_status = ""
 
     while time.time() < deadline:
@@ -266,7 +271,7 @@ def qrcode_login_lite(
                     logger.exception("on_status 回调抛异常")
 
         if status == "CONFIRMED":
-            login_token = qdata.get("token") or qdata.get("lgToken")
+            login_token = qdata.get("token") or qdata.get("lgToken") or generated_login_token
             break
         if status == "EXPIRED":
             raise TimeoutError("二维码已过期，请重新调用 qrcode_login_lite()")
@@ -326,9 +331,13 @@ def qrcode_login_lite(
         raise RuntimeError("登录链路完成但未拿到 unb cookie，扫码登录失败")
 
     cookies_dict: Dict[str, str] = {}
+    cookie_domains: Dict[str, str] = {}
     for c in s.cookies:
-        if c.domain and (".goofish.com" in c.domain or ".mmstat.com" in c.domain):
-            cookies_dict[c.name] = c.value
+        cookies_dict[c.name] = c.value
+        cookie_domains[c.name] = c.domain or ""
+    logger.info(f"扫码登录最终Cookie字段: {sorted(cookies_dict.keys())}")
+    if "havana_lgc2_77" in cookies_dict:
+        logger.info(f"扫码登录已获取 havana_lgc2_77，domain={cookie_domains.get('havana_lgc2_77')}")
 
     device_id = generate_device_id(unb)
     account_info: Dict[str, Any] = {

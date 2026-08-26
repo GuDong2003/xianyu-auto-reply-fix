@@ -15290,7 +15290,7 @@ function showQRCodeError(message) {
     </div>
     `;
     document.getElementById('qrCodeImage').style.display = 'none';
-    document.getElementById('statusText').textContent = '生成失败';
+    document.getElementById('statusText').textContent = '扫码未完成';
     document.getElementById('statusSpinner').style.display = 'none';
 }
 

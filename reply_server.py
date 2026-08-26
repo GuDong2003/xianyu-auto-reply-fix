@@ -6311,6 +6311,13 @@ async def password_login(
             if XianyuLive.is_manual_refresh_active(account_id):
                 return {'success': False, 'message': f'账号 {account_id} 正在执行手动刷新，请稍候再试'}
 
+        allow_headless_password_login = (
+            os.environ.get('XY_PASSWORD_LOGIN_ALLOW_HEADLESS', '').strip().lower()
+            in {'1', 'true', 'yes', 'on'}
+        )
+        if not allow_headless_password_login:
+            show_browser = True
+
         if not account_id or not account or not password:
             return {'success': False, 'message': '账号ID、登录账号和密码不能为空'}
 

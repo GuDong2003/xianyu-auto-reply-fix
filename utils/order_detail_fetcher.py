@@ -92,6 +92,7 @@ class OrderDetailFetcher:
         self._active_order_id = ''
         self._captured_amount_candidates: List[Dict[str, Any]] = []
         self._captured_sku_candidates: List[Dict[str, Any]] = []
+        self._captured_order_status = 'unknown'
         self._pending_response_tasks = set()
         self._response_handler = None
 
@@ -621,6 +622,7 @@ class OrderDetailFetcher:
         self._active_order_id = str(order_id or '').strip()
         self._captured_amount_candidates = []
         self._captured_sku_candidates = []
+        self._captured_order_status = 'unknown'
         self._pending_response_tasks = set()
 
     def _clear_response_capture_handler(self) -> None:
@@ -1183,6 +1185,36 @@ class OrderDetailFetcher:
 
         return candidates
 
+    def _extract_order_status_from_response(self, payload, order_id: str) -> str:
+        """Read only the current order's authoritative status, never timeline nodes."""
+        if not isinstance(payload, dict) or payload.get('api') != 'mtop.idle.web.trade.order.detail':
+            return 'unknown'
+        ret = payload.get('ret')
+        if not isinstance(ret, list) or not ret or not all(str(value).startswith('SUCCESS::') for value in ret):
+            return 'unknown'
+        data = payload.get('data')
+        if not isinstance(data, dict) or str(data.get('orderId', '')) != str(order_id):
+            return 'unknown'
+        components = data.get('components')
+        if not isinstance(components, list):
+            return 'unknown'
+        statuses = set()
+        for component in components:
+            if not isinstance(component, dict) or component.get('render') != 'orderStatusVO':
+                continue
+            status_data = component.get('data')
+            info = status_data.get('orderStatusInfo') if isinstance(status_data, dict) else None
+            title = info.get('title') if isinstance(info, dict) else None
+            if not isinstance(title, str):
+                continue
+            if title.strip() == '买家已付款，请尽快发货':
+                status = 'pending_ship'
+            else:
+                status = self._extract_status_from_text(title, source='selector')
+            if status != 'unknown':
+                statuses.add(status)
+        return statuses.pop() if len(statuses) == 1 else 'unknown'
+
     async def _process_order_detail_response(self, response, order_id: str) -> None:
         try:
             if not response or response.status != 200:
@@ -1214,6 +1246,12 @@ class OrderDetailFetcher:
 
             if payload is None or not self._payload_references_order(payload, order_id, url):
                 return
+
+            if str(order_id) == self._active_order_id:
+                captured_status = self._extract_order_status_from_response(payload, order_id)
+                if captured_status != 'unknown':
+                    self._captured_order_status = captured_status
+                    logger.info(f"捕获订单接口状态: order_id={order_id}, status={captured_status}")
 
             response_candidates = self._extract_amount_candidates_from_payload(payload, path=f"response[{url.split('?')[0]}]")
             for candidate in response_candidates:
@@ -2151,6 +2189,11 @@ class OrderDetailFetcher:
         """
         try:
             self._last_order_status_source = 'unknown'
+            await self._wait_for_response_capture_tasks(timeout=1.5)
+            if self._captured_order_status != 'unknown':
+                self._last_order_status_source = 'structured_response'
+                logger.info(f"订单状态采用接口结果: {self._captured_order_status}")
+                return self._captured_order_status
             if not await self._check_browser_status():
                 logger.error("浏览器状态异常，无法获取订单状态")
                 return 'unknown'

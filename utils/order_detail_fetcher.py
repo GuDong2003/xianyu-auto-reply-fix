@@ -1248,9 +1248,10 @@ class OrderDetailFetcher:
                 return
 
             if str(order_id) == self._active_order_id:
-                self._captured_order_status = self._extract_order_status_from_response(payload, order_id)
-                if self._captured_order_status != 'unknown':
-                    logger.info(f"捕获订单接口状态: order_id={order_id}, status={self._captured_order_status}")
+                captured_status = self._extract_order_status_from_response(payload, order_id)
+                if captured_status != 'unknown':
+                    self._captured_order_status = captured_status
+                    logger.info(f"捕获订单接口状态: order_id={order_id}, status={captured_status}")
 
             response_candidates = self._extract_amount_candidates_from_payload(payload, path=f"response[{url.split('?')[0]}]")
             for candidate in response_candidates:

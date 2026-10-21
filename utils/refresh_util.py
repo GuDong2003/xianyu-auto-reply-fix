@@ -104,7 +104,6 @@ class DrissionHandler:
         # 添加更多稳定性参数
         self.co.set_argument("--disable-dev-shm-usage")
         self.co.set_argument("--disable-gpu")
-        self.co.set_argument("--disable-web-security")
         self.co.set_argument("--disable-features=VizDisplayCompositor")
         self.co.set_argument("--disable-blink-features=AutomationControlled")  # 隐藏自动化特征
         self.co.set_argument("--disable-extensions")  # 禁用扩展

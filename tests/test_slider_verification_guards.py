@@ -595,6 +595,21 @@ class SliderVerificationGuardsTest(unittest.TestCase):
         self.assertTrue(trajectory)
         self.assertGreaterEqual(slider.current_trajectory_data["random_params"]["steps"], 39)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux browser cache layout")
+    def test_project_browser_finds_current_chrome_for_testing_layout(self):
+        slider = self._make_slider(_FakePage())
+        with tempfile.TemporaryDirectory() as cache:
+            slider.playwright_browser_cache_dir = cache
+            slider.playwright_browser_name = "chromium"
+            for revision in (1217, 1248):
+                directory = os.path.join(cache, f"chromium-{revision}", "chrome-linux64")
+                os.makedirs(directory)
+                with open(os.path.join(directory, "chrome"), "wb") as executable:
+                    executable.write(b"browser fixture")
+
+            expected = os.path.join(cache, "chromium-1248", "chrome-linux64", "chrome")
+            self.assertEqual(slider._find_project_browser_executable(), expected)
+
     def test_init_browser_uses_account_persistent_profile_when_enabled(self):
         class _FakeBrowser:
             def is_connected(self):

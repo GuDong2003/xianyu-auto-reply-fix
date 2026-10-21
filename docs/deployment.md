@@ -7,7 +7,7 @@
 ## 环境要求
 
 - **Python**: 3.11+
-- **Node.js**: 16+（用于 PyExecJS 执行 JavaScript）
+- **Node.js**: 推荐 24.22.1+（24.x LTS）；也支持 22.23.4+（22.x）或 26.12.1+（26.x），用于 PyExecJS 和 Playwright 驱动
 - **系统**: Windows / Linux / macOS
 - **架构**: x86_64 (amd64) / ARM64 (aarch64)
 - **Docker**: 20.10+（Docker 部署）
@@ -104,6 +104,7 @@ source venv/bin/activate  # Linux/macOS
 
 pip install --upgrade pip
 pip install -r requirements.txt
+export PLAYWRIGHT_NODEJS_PATH="$(command -v node)"  # Linux/macOS，使用已修复的 Node
 playwright install chromium
 # Linux 可能还需要：playwright install-deps chromium
 
@@ -112,7 +113,17 @@ python Start.py
 
 访问：`http://localhost:8090`
 
-> 本地运行请确保已安装 Node.js，否则 `PyExecJS` 相关功能无法正常使用。
+> 启动程序会校验 Node.js 的安全版本，并让 Playwright 使用外部 Node。仅重新安装 Playwright 可能仍带入旧版内置 Node。Windows PowerShell 可使用 `$env:PLAYWRIGHT_NODEJS_PATH = (Get-Command node).Source`；显式指定的路径也会接受版本校验。
+
+> 从旧环境更新时，升级依赖后执行 `python -m pip uninstall -y blackboxprotobuf protobuf`，移除旧版未使用的依赖链。消息解码使用项目内的 MessagePackDecoder，不依赖这两个包。
+
+### 2026 年 10 月证书事件的更新要求
+
+- 当前依赖固定 Playwright 1.64.0，更新 Python 包后需要重新执行 `python -m playwright install chromium`。
+- Ubuntu 24.04 的 `ca-certificates` 至少更新到 `20260816ubuntu0.24.04.1`。系统 CA、Python certifi 和浏览器的信任库需要分别更新。
+- 本项目浏览器上下文启用 HTTPS 证书验证。遇到证书错误时应修复对端证书链或本地信任库。
+- 浏览器版本更新后，可使用 [eMudhra 专项检测页](https://emudhra.we-have-a-problem.com/#check) 核验。自动化浏览器的新配置可能没有撤销列表，仅更新浏览器二进制仍可能出现红色；应更新撤销组件或在浏览器信任库中明确禁用受影响的 emSign ECC Root CA - G3。
+- Linux Chromium 的本地信任设置使用 NSS Shared DB；M146 起默认路径为 `~/.local/share/pki/nssdb`，已有 `~/.pki/nssdb` 时沿用旧路径。证书管理操作参见 [Chromium 官方说明](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/linux/cert_management.md)。本机已按指纹核对并添加 G3 根的不信任记录。
 
 ## 多架构支持
 

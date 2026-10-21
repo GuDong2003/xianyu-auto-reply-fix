@@ -7,7 +7,6 @@ import struct
 import os
 from typing import Any, Dict, List
 
-import blackboxprotobuf
 from loguru import logger
 
 import execjs

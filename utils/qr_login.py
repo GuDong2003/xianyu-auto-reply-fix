@@ -286,7 +286,7 @@ class QRLoginManager:
                 viewport={'width': 540, 'height': 960},
                 locale='zh-CN',
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                ignore_https_errors=True,
+                ignore_https_errors=False,
                 extra_http_headers={
                     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
                 }

@@ -1641,7 +1641,6 @@ def patch_login_with_password_headful():
                         '--disable-setuid-sandbox',
                         '--disable-dev-shm-usage',
                         '--disable-blink-features=AutomationControlled',
-                        '--disable-web-security',
                         '--disable-features=VizDisplayCompositor',
                     ]
                     
@@ -1653,7 +1652,7 @@ def patch_login_with_password_headful():
                         viewport={'width': 1980, 'height': 1024},
                         user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
                         accept_downloads=True,
-                        ignore_https_errors=True
+                        ignore_https_errors=False
                     )
                     
                     browser = context.browser

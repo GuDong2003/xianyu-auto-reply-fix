@@ -10,6 +10,11 @@ import sys
 import shutil
 from pathlib import Path
 
+from utils.node_runtime import configure_playwright_node
+
+# 在浏览器检查、依赖安装和账号任务启动前固定已修复的 Node 运行时。
+configure_playwright_node()
+
 # 设置标准输出编码为UTF-8（Windows兼容）
 def _setup_console_encoding():
     """设置控制台编码为UTF-8，避免Windows GBK编码问题"""

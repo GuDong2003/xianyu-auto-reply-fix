@@ -1729,6 +1729,7 @@ class XianyuSliderStealth:
         elif sys.platform.startswith("linux"):
             search_rules = {
                 "chromium": [
+                    ("chromium-*", os.path.join("chrome-linux64", "chrome")),
                     ("chromium-*", os.path.join("chrome-linux", "chrome")),
                     ("chromium-*", os.path.join("chrome-linux", "headless_shell")),
                 ],
@@ -2383,7 +2384,7 @@ class XianyuSliderStealth:
                 persistent_launch_options.update(context_options)
                 persistent_launch_options.update({
                     'accept_downloads': True,
-                    'ignore_https_errors': True,
+                    'ignore_https_errors': False,
                 })
                 logger.info(f"【{self.pure_user_id}】token_refresh滑块优先复用账号级浏览器目录: {user_data_dir}")
                 try:
@@ -11090,7 +11091,7 @@ class XianyuSliderStealth:
             user_agent=browser_features['user_agent'],
             locale=browser_features['locale'],
             accept_downloads=True,
-            ignore_https_errors=True,
+            ignore_https_errors=False,
             extra_http_headers={
                 'Accept-Language': browser_features['accept_lang']
             }
@@ -11233,7 +11234,6 @@ class XianyuSliderStealth:
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--disable-blink-features=AutomationControlled',
-                '--disable-web-security',
                 '--disable-features=VizDisplayCompositor',
                 '--lang=zh-CN',
                 '--disable-infobars',
@@ -11281,7 +11281,7 @@ class XianyuSliderStealth:
                         user_agent=browser_features['user_agent'],
                         locale=browser_features['locale'],
                         accept_downloads=True,
-                        ignore_https_errors=True,
+                        ignore_https_errors=False,
                         extra_http_headers={
                             'Accept-Language': browser_features['accept_lang']
                         }

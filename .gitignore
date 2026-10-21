@@ -819,3 +819,6 @@ secure_confirm_ultra.py
 secure_freeshipping_ultra.py
 test_php_stats.py
 .playwright-browsers/
+
+# 安全修复的回归测试
+!tests/test_node_runtime.py

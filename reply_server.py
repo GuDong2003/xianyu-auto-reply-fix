@@ -24,6 +24,10 @@ import concurrent.futures
 import queue
 from collections import defaultdict
 
+from utils.node_runtime import configure_playwright_node
+
+configure_playwright_node()
+
 import cookie_manager
 from db_manager import db_manager
 from config import RISK_CONTROL

@@ -3778,14 +3778,14 @@
                       </label>
                       <div class="input-group">
                         <input type="password" class="form-control" id="qqReplySecretKey"
-                               placeholder="请输入QQ回复消息API秘钥">
+                               placeholder="留空并保存可禁用发送接口">
                         <button class="btn btn-outline-secondary" type="button" onclick="togglePasswordVisibility('qqReplySecretKey')">
                           <i class="bi bi-eye" id="qqReplySecretKey-icon"></i>
                         </button>
                       </div>
                       <div class="form-text">
                         <i class="bi bi-info-circle me-1"></i>
-                        用于验证 <code>/send-message</code> API接口的访问权限，确保只有授权的应用可以发送消息
+                        留空时禁用 <code>/send-message</code>。调用时还需账号所属用户的有效登录凭证，只能发送该用户自己账号的消息
                       </div>
                     </div>
                   </div>
@@ -3828,6 +3828,7 @@
                   </h6>
                   <div class="bg-light p-3 rounded">
                     <p class="mb-2"><strong>接口地址：</strong> <code>POST /send-message</code></p>
+                    <p class="mb-2"><strong>请求头：</strong> <code>Authorization: Bearer &lt;账号所属用户的登录凭证&gt;</code> 和 <code>Content-Type: application/json</code></p>
                     <p class="mb-2"><strong>请求参数：</strong></p>
                     <pre class="mb-2"><code>{
   "api_key": "您的秘钥",
@@ -3838,7 +3839,7 @@
 }</code></pre>
                     <p class="mb-0">
                       <i class="bi bi-lightbulb me-1 text-warning"></i>
-                      <strong>提示：</strong>请妥善保管API秘钥，避免泄露给未授权的第三方
+                      <strong>提示：</strong>请妥善保管API秘钥和登录凭证。旧默认秘钥和测试秘钥已禁用；登录凭证过期或服务重启后需重新登录
                     </p>
                   </div>
                 </div>

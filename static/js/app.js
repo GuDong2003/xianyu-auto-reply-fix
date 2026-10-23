@@ -16530,12 +16530,8 @@ function togglePasswordVisibility(inputId) {
 
 // 生成随机秘钥
 function generateRandomSecretKey() {
-    // 生成32位随机字符串
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let result = 'xianyu_qq_';
-    for (let i = 0; i < 24; i++) {
-        result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    const randomBytes = crypto.getRandomValues(new Uint8Array(32));
+    const result = 'xianyu_qq_' + Array.from(randomBytes, byte => byte.toString(16).padStart(2, '0')).join('');
 
     const qqReplySecretKeyInput = document.getElementById('qqReplySecretKey');
     if (qqReplySecretKeyInput) {
@@ -16548,12 +16544,7 @@ function generateRandomSecretKey() {
 async function updateQQReplySecretKey() {
     const qqReplySecretKey = document.getElementById('qqReplySecretKey').value.trim();
 
-    if (!qqReplySecretKey) {
-        showToast('请输入QQ回复消息API秘钥', 'warning');
-        return;
-    }
-
-    if (qqReplySecretKey.length < 8) {
+    if (qqReplySecretKey && qqReplySecretKey.length < 8) {
         showToast('秘钥长度至少需要8位字符', 'warning');
         return;
     }
@@ -16578,7 +16569,9 @@ async function updateQQReplySecretKey() {
             const statusDiv = document.getElementById('qqReplySecretStatus');
             const statusText = document.getElementById('qqReplySecretStatusText');
             if (statusDiv && statusText) {
-                statusText.textContent = `秘钥已更新，长度: ${qqReplySecretKey.length} 位`;
+                statusText.textContent = qqReplySecretKey
+                    ? `秘钥已更新，长度: ${qqReplySecretKey.length} 位`
+                    : '秘钥已清空，发送接口已禁用';
                 statusDiv.style.display = 'block';
 
                 // 3秒后隐藏状态

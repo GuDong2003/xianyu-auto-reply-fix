@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import unquote
 from urllib import request as urllib_request, error as urllib_error
 import hashlib
+import hmac
 import secrets
 import time
 import json
@@ -2346,9 +2347,12 @@ async def register(request: RegisterRequest):
 
 # ------------------------- 发送消息接口 -------------------------
 
-# 固定的API秘钥（生产环境中应该从配置文件或环境变量读取）
-# 注意：现在从系统设置中读取QQ回复消息秘钥
-API_SECRET_KEY = "xianyu_api_secret_2024"  # 保留作为后备
+# 历史公开秘钥始终禁用，包括旧数据库或备份中残留的值。
+_INSECURE_SEND_API_KEYS = frozenset({
+    "xianyu_qq_reply_2024",
+    "xianyu_api_secret_2024",
+    "zhinina_test_key",
+})
 
 class SendMessageRequest(BaseModel):
     api_key: str
@@ -2364,26 +2368,29 @@ class SendMessageResponse(BaseModel):
 
 
 def verify_api_key(api_key: str) -> bool:
-    """验证API秘钥"""
+    """验证显式配置的发送秘钥；未配置、旧默认值或读取失败时拒绝请求。"""
+    if not isinstance(api_key, str) or not api_key.strip():
+        return False
     try:
-        # 从系统设置中获取QQ回复消息秘钥
-        from db_manager import db_manager
         qq_secret_key = db_manager.get_system_setting('qq_reply_secret_key')
-
-        # 如果系统设置中没有配置，使用默认值
-        if not qq_secret_key:
-            qq_secret_key = API_SECRET_KEY
-
-        return api_key == qq_secret_key
-    except Exception as e:
-        logger.error(f"验证API秘钥时发生异常: {e}")
-        # 异常情况下使用默认秘钥验证
-        return api_key == API_SECRET_KEY
+        if (
+            not isinstance(qq_secret_key, str)
+            or not qq_secret_key.strip()
+            or qq_secret_key.strip() in _INSECURE_SEND_API_KEYS
+        ):
+            return False
+        return hmac.compare_digest(api_key.encode('utf-8'), qq_secret_key.encode('utf-8'))
+    except Exception:
+        logger.error("读取发送消息API秘钥失败，拒绝请求")
+        return False
 
 
 @app.post('/send-message', response_model=SendMessageResponse)
-async def send_message_api(request: SendMessageRequest):
-    """发送消息API接口（使用秘钥验证）"""
+async def send_message_api(
+    request: SendMessageRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """使用登录凭证和API秘钥发送消息，仅允许操作当前用户自己的账号。"""
     try:
         # 清理所有参数中的换行符
         def clean_param(param_str):
@@ -2392,8 +2399,8 @@ async def send_message_api(request: SendMessageRequest):
                 return param_str.replace('\\n', '').replace('\n', '')
             return param_str
 
-        # 清理所有参数
-        cleaned_api_key = clean_param(request.api_key)
+        # 秘钥必须精确匹配，仅清理业务参数
+        cleaned_api_key = request.api_key
         cleaned_cookie_id = clean_param(request.cookie_id)
         cleaned_chat_id = clean_param(request.chat_id)
         cleaned_to_user_id = clean_param(request.to_user_id)
@@ -2407,17 +2414,9 @@ async def send_message_api(request: SendMessageRequest):
                 message="API秘钥不能为空"
             )
 
-        # 特殊测试秘钥处理
-        if cleaned_api_key == "zhinina_test_key":
-            logger.info("使用测试秘钥，直接返回成功")
-            return SendMessageResponse(
-                success=True,
-                message="接口验证成功"
-            )
-
         # 验证API秘钥
         if not verify_api_key(cleaned_api_key):
-            logger.warning(f"API秘钥验证失败: {mask_sensitive_text(cleaned_api_key)}")
+            logger.warning("API秘钥验证失败")
             return SendMessageResponse(
                 success=False,
                 message="API秘钥验证失败"
@@ -2439,13 +2438,16 @@ async def send_message_api(request: SendMessageRequest):
                     message=f"参数 {param_name} 不能为空"
                 )
 
+        # 必须在黑名单查询、实例查找和发送之前验证账号归属。
+        cleaned_cookie_id = _ensure_cookie_access(cleaned_cookie_id, current_user)
+
         blacklist_hit = _get_blacklist_block_by_cookie(cleaned_cookie_id, cleaned_to_user_id)
         if blacklist_hit:
             block_message = _format_blacklist_block_message(blacklist_hit)
             logger.warning(f"API发送消息被黑名单拦截: cookie_id={cleaned_cookie_id}, buyer_id={cleaned_to_user_id}, scope={blacklist_hit.get('scope')}")
             return SendMessageResponse(success=False, message=block_message)
 
-        # 直接获取XianyuLive实例，跳过cookie_manager检查
+        # 仅查找已经通过当前用户归属检查的账号实例
         from XianyuAutoAsync import XianyuLive, ConnectionState
         live_instance = XianyuLive.get_instance(cleaned_cookie_id)
 
@@ -2485,7 +2487,7 @@ async def send_message_api(request: SendMessageRequest):
             timeout=15,
         )
 
-        logger.info(f"API成功发送消息: {cleaned_cookie_id} -> {cleaned_to_user_id}, 内容: {cleaned_message[:50]}{'...' if len(cleaned_message) > 50 else ''}")
+        log_with_user('info', f"API成功发送消息: {cleaned_cookie_id} -> {cleaned_to_user_id}", current_user)
 
         return SendMessageResponse(
             success=True,
@@ -2497,10 +2499,7 @@ async def send_message_api(request: SendMessageRequest):
         cookie_id_for_log = clean_param(request.cookie_id) if 'clean_param' in locals() else request.cookie_id
         to_user_id_for_log = clean_param(request.to_user_id) if 'clean_param' in locals() else request.to_user_id
         logger.warning(f"API发送消息被拒绝: {cookie_id_for_log} -> {to_user_id_for_log}, 原因: {mask_sensitive_text(e.detail)}")
-        return SendMessageResponse(
-            success=False,
-            message=str(e.detail or "发送消息失败，请稍后重试")
-        )
+        raise
     except Exception as e:
         # 使用清理后的参数记录日志
         cookie_id_for_log = clean_param(request.cookie_id) if 'clean_param' in locals() else request.cookie_id
@@ -2898,6 +2897,14 @@ NIGHT_MODE_SYSTEM_SETTING_KEYS = {
 
 
 def _validate_system_setting_value(key: str, value: str) -> str:
+    if key == 'qq_reply_secret_key':
+        normalized = value.strip()
+        if normalized in _INSECURE_SEND_API_KEYS:
+            raise HTTPException(status_code=400, detail='公开的默认或测试秘钥已禁用，请生成随机秘钥')
+        if normalized and len(normalized) < 8:
+            raise HTTPException(status_code=400, detail='秘钥长度至少需要8位字符')
+        return normalized
+
     if key == 'risk_control_night_mode_enabled':
         normalized = str(value).strip().lower()
         if normalized in {'true', '1', 'yes', 'on'}:
@@ -8219,6 +8226,8 @@ def get_system_settings(current_user: Dict[str, Any] = Depends(get_current_user)
         # 移除敏感信息
         if 'admin_password_hash' in settings:
             del settings['admin_password_hash']
+        if not (current_user.get('is_admin') or current_user.get('username') == ADMIN_USERNAME):
+            settings.pop('qq_reply_secret_key', None)
         return settings
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -8235,6 +8244,9 @@ def update_system_setting(key: str, setting_data: SystemSettingIn, current_user:
         # 禁止直接修改密码哈希
         if key == 'admin_password_hash':
             raise HTTPException(status_code=400, detail='请使用密码修改接口')
+
+        if key == 'qq_reply_secret_key':
+            require_admin(current_user)
 
         value = _validate_system_setting_value(key, setting_data.value)
 

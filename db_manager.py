@@ -1008,8 +1008,16 @@ Cookie数量: {cookie_count}
             ('qq_notification_api_url', '', 'QQ 私信通知 API 地址（留空则禁用 QQ 私信通知）'),
             ('auto_comment_api_url', '', '自动好评辅助 API 地址（留空则禁用此功能，避免 Cookie 外发）'),
             ('auto_red_flower_interval_seconds', '300', '自动求小红花后台任务检查间隔秒数'),
-            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥')
+            ('qq_reply_secret_key', '', 'QQ回复消息API秘钥（留空禁用，调用时还需账号所属用户的登录凭证）')
             ''')
+
+            # 升级旧安装时撤销公开秘钥，保留管理员自行设置的秘钥。
+            cursor.execute('''
+                UPDATE system_settings
+                SET value = '', updated_at = CURRENT_TIMESTAMP
+                WHERE key = 'qq_reply_secret_key'
+                  AND TRIM(value) IN (?, ?, ?)
+            ''', ('xianyu_qq_reply_2024', 'xianyu_api_secret_2024', 'zhinina_test_key'))
 
             # 检查并升级数据库
             self.check_and_upgrade_db(cursor)

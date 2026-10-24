@@ -12,7 +12,7 @@ from utils.xianyu_utils import generate_sign, trans_cookies
 
 ORDER_LIST_API_URL = 'https://h5api.m.goofish.com/h5/mtop.taobao.idle.trade.merchant.sold.get/1.0/'
 ORDER_LIST_API_NAME = 'mtop.taobao.idle.trade.merchant.sold.get'
-ORDER_LIST_REFERER = 'https://seller.goofish.com/?site=COMMONPRO#/seller-trade/order-manage'
+ORDER_LIST_REFERER = 'https://seller.goofish.com/'
 ORDER_LIST_QUERY_CODE = 'ALL'
 DEFAULT_PAGE_SIZE = 20
 ORDER_HISTORY_ANCHOR_FIELDS = (
@@ -264,15 +264,13 @@ class OrderHistoryPageFetcher:
             return
 
         timeout = aiohttp.ClientTimeout(total=30)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        self.session = aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar())
 
     def _build_request_headers(self) -> Dict[str, str]:
         return {
             'accept': 'application/json',
             'content-type': 'application/x-www-form-urlencoded',
-            'cookie': self.cookie_string,
-            'idle_site_biz_code': 'COMMONPRO',
-            'idle_user_group_member_id': '',
+            'cookie': self.cookie_string.replace('\r', '').replace('\n', ''),
             'origin': 'https://seller.goofish.com',
             'referer': ORDER_LIST_REFERER,
             'user-agent': (
@@ -293,14 +291,14 @@ class OrderHistoryPageFetcher:
             't': str(int(time.time() * 1000)),
             'sign': '',
             'v': '1.0',
-            'type': 'json',
+            'type': 'originaljson',
             'accountSite': 'xianyu',
             'dataType': 'json',
             'timeout': '20000',
             'api': ORDER_LIST_API_NAME,
             'valueType': 'string',
             'sessionOption': 'AutoLoginOnly',
-            'spm_cnt': 'a21107h.42831410.0.0',
+            'spm_cnt': 'a21107h.42826273.0.0',
         }
         params['sign'] = generate_sign(params['t'], token, data_val)
         return params

@@ -42,6 +42,7 @@ from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
 from utils.item_pagination import MAX_ITEM_LIST_PAGE_SIZE
 from utils.item_sync import ItemSyncInProgress, item_sync_slot
+from utils.notification_templates import validate_channel_templates
 from utils.product_sku import ProductSkuValidationError, normalize_sku_config
 from utils.time_utils import (
     LOCAL_TIMEZONE,
@@ -53,6 +54,7 @@ from utils.time_utils import (
     utc_timestamp_to_local_datetime,
 )
 from utils.notification_dispatcher import (
+    parse_notification_config,
     build_face_verify_notification,
     SUPPORTED_NOTIFICATION_TEMPLATE_TYPES,
     dispatch_account_notifications_sync,
@@ -7674,6 +7676,7 @@ def create_notification_channel(channel_data: NotificationChannelIn, current_use
     from db_manager import db_manager
     try:
         user_id = current_user['user_id']
+        validate_channel_templates(parse_notification_config(channel_data.config))
         channel_id = db_manager.create_notification_channel(
             channel_data.name,
             channel_data.type,
@@ -7707,6 +7710,7 @@ def update_notification_channel(channel_id: int, channel_data: NotificationChann
     from db_manager import db_manager
     try:
         user_id = current_user['user_id']
+        validate_channel_templates(parse_notification_config(channel_data.config))
         success = db_manager.update_notification_channel(
             channel_id,
             channel_data.name,

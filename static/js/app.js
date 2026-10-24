@@ -7639,6 +7639,26 @@ const channelTypeConfigs = {
     }
 };
 
+Object.values(channelTypeConfigs).forEach(config => {
+    config.fields.push(
+        {
+            id: 'message_template', label: '聊天消息模板（选填）', type: 'textarea', required: false,
+            placeholder: '账号 {account_id} 收到 {buyer_name} 的消息：{message}',
+            help: '留空沿用系统模板。可用：{account_id}、{buyer_name}、{buyer_id}、{item_id}、{chat_id}、{message}、{time}。最多4000字。'
+        },
+        {
+            id: 'delivery_template', label: '发货通知模板（选填）', type: 'textarea', required: false,
+            placeholder: '账号 {account_id} 订单 {order_id}：{result}',
+            help: '可用聊天模板变量及 {order_id}、{result}；缺少的数据会显示“未知”。'
+        },
+        {
+            id: 'account_template', label: '账号异常模板（选填）', type: 'textarea', required: false,
+            placeholder: '{title}\n账号：{account_id}\n{detail}',
+            help: '可用：{account_id}、{title}、{detail}、{error_message}、{verification_url}、{time}。留空沿用系统模板。'
+        }
+    );
+});
+
 // 显示添加渠道模态框
 function showAddChannelModal(type) {
     const config = channelTypeConfigs[type];
@@ -7840,14 +7860,15 @@ function renderNotificationChannels(channels) {
         configDisplay = configEntries.map(([key, value]) => {
             // 隐藏敏感信息
             if (key.includes('password') || key.includes('token') || key.includes('secret')) {
-            return `${key}: ****`;
+            return `${escapeHtml(key)}: ****`;
             }
             // 截断过长的值
-            const displayValue = value.length > 30 ? value.substring(0, 30) + '...' : value;
-            return `${key}: ${displayValue}`;
+            const valueText = String(value ?? '');
+            const displayValue = valueText.length > 30 ? valueText.substring(0, 30) + '...' : valueText;
+            return `${escapeHtml(key)}: ${escapeHtml(displayValue)}`;
         }).join('<br>');
         } else {
-        configDisplay = channel.config || '无配置';
+        configDisplay = escapeHtml(channel.config || '无配置');
         }
     } catch (e) {
         // 兼容旧格式
@@ -7855,6 +7876,7 @@ function renderNotificationChannels(channels) {
         if (configDisplay.length > 30) {
         configDisplay = configDisplay.substring(0, 30) + '...';
         }
+        configDisplay = escapeHtml(configDisplay);
     }
 
     tr.innerHTML = `
@@ -7862,10 +7884,10 @@ function renderNotificationChannels(channels) {
         <td>
         <div class="d-flex align-items-center">
             <i class="bi ${typeConfig ? typeConfig.icon : 'bi-bell'} me-2 text-${typeColor}"></i>
-            ${channel.name}
+            ${escapeHtml(channel.name)}
         </div>
         </td>
-        <td><span class="badge bg-${typeColor}">${typeDisplay}</span></td>
+        <td><span class="badge bg-${typeColor}">${escapeHtml(typeDisplay)}</span></td>
         <td><small class="text-muted">${configDisplay}</small></td>
         <td>${statusBadge}</td>
         <td>

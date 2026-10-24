@@ -41,6 +41,7 @@ from utils.notification_dispatcher import (
 from utils.item_pagination import normalize_item_list_page_size
 from utils.item_sync import sync_all_item_pages
 from utils.ai_item_context import build_ai_item_info
+from utils.ai_pause import AIPauseStore, pause_after_manual_reply
 
 
 MANUAL_VERIFICATION_CONTEXTS = {
@@ -155,6 +156,11 @@ class AutoReplyPauseManager:
     def __init__(self):
         # 存储每个chat_id的暂停信息 {chat_id: pause_until_timestamp}
         self.paused_chats = {}
+
+    def pause_after_manual_reply(self,chat_id,cookie_id,buyer_id='',item_id=''):
+        from db_manager import db_manager
+        if not pause_after_manual_reply(db_manager,cookie_id,chat_id,buyer_id,item_id):
+            self.pause_chat(chat_id,cookie_id)
 
     def pause_chat(self, chat_id: str, cookie_id: str):
         """暂停指定chat_id的自动回复，使用账号特定的暂停时间"""
@@ -10324,7 +10330,7 @@ class XianyuLive:
 
             # 生成AI回复
             # 由于外部已实现防抖机制，跳过内部等待（skip_wait=True）
-            reply = ai_reply_engine.generate_reply(
+            reply = await ai_reply_engine.generate_reply_async(
                 message=send_message,
                 item_info=item_info,
                 chat_id=chat_id,
@@ -16184,6 +16190,8 @@ class XianyuLive:
                         # 3. 最后尝试AI回复
                         if skip_ai_reply:
                             logger.info(f"[{msg_time}] 【{self.cookie_id}】命中消息过滤规则，跳过AI回复")
+                        elif AIPauseStore(db_manager).remaining(self.cookie_id,send_user_id,item_id):
+                            logger.info('当前买家和商品处于人工接管的AI暂停期')
                         else:
                             reply = await self.get_ai_reply(send_user_name, send_user_id, send_message, item_id, chat_id)
                             if reply:
@@ -16224,6 +16232,9 @@ class XianyuLive:
             # 注意：这里只有商品ID，没有标题和详情，根据新的规则不保存到数据库
             # 商品信息会在其他有完整信息的地方保存（如发货规则匹配时）
             # 消息通知已在收到消息时立即发送，此处不再重复发送
+
+            if reply and reply_source == 'AI' and AIPauseStore(db_manager).remaining(self.cookie_id,send_user_id,item_id):
+                return
 
             # 如果有回复内容，发送消息
             if reply:
@@ -16792,7 +16803,7 @@ class XianyuLive:
                 try:
                     from chat_event_hub import self_send_dedup
                     if self_send_dedup.consume(self.cookie_id, chat_id, str(self.myid), send_message):
-                        pause_manager.pause_chat(chat_id, self.cookie_id)
+                        pause_manager.pause_after_manual_reply(chat_id,self.cookie_id,item_id=item_id)
                         logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（Web 自发回推已去重）")
                         return
                 except Exception as _e:
@@ -16825,7 +16836,7 @@ class XianyuLive:
                     logger.debug(f"保存/推送手动消息失败: {self._safe_str(_e)}")
 
                 # 暂停该chat_id的自动回复10分钟
-                pause_manager.pause_chat(chat_id, self.cookie_id)
+                pause_manager.pause_after_manual_reply(chat_id,self.cookie_id,item_id=item_id)
 
                 logger.info(f"【{self.cookie_id}】[{msg_id}] ⏹️ 处理结束（手动发出消息）")
                 return

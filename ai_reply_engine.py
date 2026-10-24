@@ -16,6 +16,7 @@ from typing import List, Dict, Optional
 from loguru import logger
 from db_manager import db_manager
 from utils.ai_item_context import format_ai_item_context
+from utils.ai_pause import AIPauseStore
 
 
 class AIReplyEngine:
@@ -400,6 +401,8 @@ class AIReplyEngine:
         """
         if not self.is_ai_enabled(cookie_id):
             return None
+        if AIPauseStore(db_manager).remaining(cookie_id,user_id,item_id):
+            return None
         
         try:
             # 先保存用户消息到数据库（意图暂时设为None，后续可根据需要更新）
@@ -415,9 +418,11 @@ class AIReplyEngine:
                 logger.info(f"【{cookie_id}】消息已保存（外部防抖已启用）: {message[:20]}...")
             
             # 获取该chat_id的锁，确保同一对话的消息串行处理
-            chat_lock = self._get_chat_lock(chat_id)
+            chat_lock = self._get_chat_lock((str(cookie_id),str(chat_id)))
             
             with chat_lock:
+                if AIPauseStore(db_manager).remaining(cookie_id,user_id,item_id):
+                    return None
                 # 检查是否有更新的消息
                 query_seconds = 6 if skip_wait else 25
                 recent_messages = self._get_recent_user_messages(chat_id, cookie_id, seconds=query_seconds)
@@ -503,6 +508,9 @@ class AIReplyEngine:
                 else:
                     # openai / ollama / 空值 均走 chat/completions
                     reply = self._call_openai_chat_api(settings, messages, max_tokens=150, temperature=0.7)
+
+                if AIPauseStore(db_manager).remaining(cookie_id,user_id,item_id):
+                    return None
 
                 # 10. 保存AI回复到对话记录
                 self.save_conversation(chat_id, cookie_id, user_id, item_id, "assistant", reply, intent=None)

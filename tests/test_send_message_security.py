@@ -334,6 +334,48 @@ class SendMessageSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code,200)
         self.assertTrue(response.json()['success'])
 
+    def test_ai_manual_pause_config_and_context_are_user_scoped(self):
+        endpoint = '/cookies/owned-account/ai-manual-pause'
+        for user in ('other','admin'):
+            self.assertEqual(self.client.get(endpoint,headers=self.headers(user)).status_code,403)
+            self.assertEqual(self.client.put(endpoint,headers=self.headers(user),json={'enabled':True,'minutes':5}).status_code,403)
+        response = self.client.put(endpoint,headers=self.headers(),json={'enabled':True,'minutes':5})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(self.client.get(endpoint,headers=self.headers()).json(),{'enabled':True,'minutes':5})
+        self.assertEqual(self.client.put(endpoint,headers=self.headers(),json={'enabled':True,'minutes':0}).status_code,422)
+        payload = {'cookie_id':'owned-account','chat_id':'synthetic-chat','buyer_id':'pause-buyer','item_id':'pause-item'}
+        self.assertEqual(self.client.post('/api/chat/ai-pause',headers=self.headers('other'),json=payload).status_code,403)
+        response = self.client.post('/api/chat/ai-pause',headers=self.headers(),json=payload)
+        self.assertEqual(response.status_code,200)
+        self.assertGreater(response.json()['remaining_seconds'],0)
+        response = self.client.get('/api/chat/ai-pause',headers=self.headers(),params=payload)
+        self.assertEqual(response.status_code,200)
+        self.assertGreater(response.json()['remaining_seconds'],0)
+        response = self.client.post('/api/chat/ai-pause',headers=self.headers(),json={**payload,'resume':True})
+        self.assertEqual(response.json()['remaining_seconds'],0)
+        self.assertEqual(self.client.post('/api/chat/ai-pause',headers=self.headers(),json={'cookie_id':'owned-account','chat_id':'missing'}).status_code,400)
+
+    def test_web_manual_send_pauses_ai_only_after_successful_transport(self):
+        from utils.ai_pause import AIPauseStore,pause_after_manual_reply
+        from types import SimpleNamespace
+        store = AIPauseStore(self.db)
+        store.set_config('owned-account',True,5)
+        self.db.save_chat_message('owned-account','manual-context',sender_id='manual-buyer',sender_name='Synthetic buyer',item_id='manual-item',content='Hello',direction=2)
+        callback = mock.Mock(side_effect=lambda chat,cookie,**kwargs: pause_after_manual_reply(self.db,cookie,chat,**kwargs))
+        sys.modules['XianyuAutoAsync'].pause_manager = SimpleNamespace(pause_after_manual_reply=callback)
+        payload = {'cookie_id':'owned-account','chat_id':'manual-context','to_user_id':'manual-buyer','message':'Synthetic manual reply'}
+        response = self.client.post('/api/chat/send',headers=self.headers(),json=payload)
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(response.json()['success'])
+        self.assertGreater(store.remaining('owned-account','manual-buyer','manual-item'),0)
+        store.resume('owned-account','manual-buyer','manual-item')
+        callback.reset_mock()
+        self.live.send_msg.side_effect = RuntimeError('Synthetic transport failure')
+        response = self.client.post('/api/chat/send',headers=self.headers(),json=payload)
+        self.assertEqual(response.status_code,500)
+        callback.assert_not_called()
+        self.assertEqual(store.remaining('owned-account','manual-buyer','manual-item'),0)
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

@@ -293,6 +293,28 @@ class SendMessageSecurityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.get(endpoint, headers=self.headers()).json(), {'enabled': True, 'content': 'Thanks'})
 
+    def test_relist_rules_cannot_reference_foreign_resources_or_be_changed_by_other_users(self):
+        self.db.conn.execute("INSERT OR REPLACE INTO item_info (cookie_id,item_id,item_title) VALUES ('owned-account','relist-item','Synthetic')")
+        self.db.conn.commit()
+        material_id = self.db.add_product_material(self.owner_id, {
+            'title':'Synthetic material','description':'Synthetic description','price':10,
+            'images':['https://example.invalid/image.png'],
+        })
+        with self.db.conn:
+            card_id = self.db.conn.execute("INSERT INTO cards (name,type,user_id) VALUES ('Synthetic','text',?)",(self.owner_id,)).lastrowid
+            foreign_card = self.db.conn.execute("INSERT INTO cards (name,type,user_id) VALUES ('Other','text',?)",(self.other_id,)).lastrowid
+        payload = {'cookie_id':'owned-account','item_id':'relist-item','material_id':material_id,'card_id':card_id}
+        self.assertEqual(self.client.post('/api/auto-relist/rules',headers=self.headers('other'),json=payload).status_code,403)
+        self.assertEqual(self.client.post('/api/auto-relist/rules',headers=self.headers(),json={**payload,'card_id':foreign_card}).status_code,400)
+        response = self.client.post('/api/auto-relist/rules',headers=self.headers(),json=payload)
+        self.assertEqual(response.status_code,200)
+        rule_id = response.json()['id']
+        endpoint = f'/api/auto-relist/rules/{rule_id}'
+        self.assertEqual(self.client.put(endpoint,headers=self.headers('other'),json={'enabled':True}).status_code,404)
+        self.assertEqual(self.client.post(endpoint+'/check',headers=self.headers('other')).status_code,404)
+        self.assertEqual(self.client.get('/api/auto-relist/rules',headers=self.headers('other')).json()['rules'],[])
+        self.assertEqual(self.client.delete(endpoint,headers=self.headers()).status_code,200)
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

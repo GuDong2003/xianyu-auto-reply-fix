@@ -1216,6 +1216,8 @@ logger.info("Web服务器启动，文件日志收集器已初始化")
 async def start_scheduled_task_checker():
     """应用启动时开启定时任务检查协程"""
     asyncio.create_task(scheduled_task_checker())
+    from auto_relist_task import auto_relist_task_loop
+    asyncio.create_task(auto_relist_task_loop())
     logger.info("定时任务调度器已启动")
     try:
         from auto_rate_task import auto_rate_task_loop
@@ -10718,6 +10720,88 @@ async def _run_product_batch_publish(batch_id: str, jobs: List[Dict[str, Any]], 
                 f"account_id={account_id}, material_id={material.get('id')}, error={mask_sensitive_text(exc)}"
             )
     logger.info(f"{get_user_log_prefix(current_user)} 商品批量发布任务结束: batch_id={batch_id}")
+
+
+class AutoRelistCreate(BaseModel):
+    cookie_id: str
+    item_id: str
+    material_id: int = Field(gt=0)
+    card_id: int = Field(gt=0)
+    enabled: bool = False
+    delay_seconds: int = Field(default=60, ge=0, le=86400)
+    min_stock: int = Field(default=1, ge=1, le=100000)
+
+
+class AutoRelistUpdate(BaseModel):
+    enabled: bool
+    delay_seconds: int = Field(default=60, ge=0, le=86400)
+    min_stock: int = Field(default=1, ge=1, le=100000)
+
+
+@app.get('/api/auto-relist/rules')
+def list_auto_relist_rules(current_user: Dict[str, Any] = Depends(get_current_user)):
+    from utils.relist_store import RelistStore
+    return {'rules': RelistStore(db_manager).rules(current_user['user_id'])}
+
+
+@app.post('/api/auto-relist/rules')
+def create_auto_relist_rule(request: AutoRelistCreate, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from utils.relist_store import RelistStore
+    cid = _ensure_cookie_access(request.cookie_id, current_user)
+    try:
+        rule_id = RelistStore(db_manager).create(current_user['user_id'], cid, request.item_id.strip(),
+            request.material_id, request.card_id, request.enabled, request.delay_seconds, request.min_stock)
+        return {'success': True, 'id': rule_id}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.put('/api/auto-relist/rules/{rule_id}')
+def update_auto_relist_rule(rule_id: int, request: AutoRelistUpdate, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from utils.relist_store import RelistStore
+    if not RelistStore(db_manager).update(rule_id,current_user['user_id'],request.enabled,request.delay_seconds,request.min_stock):
+        raise HTTPException(status_code=404, detail='续售规则不存在')
+    return {'success': True}
+
+
+@app.get('/api/auto-relist/events')
+def list_auto_relist_events(current_user: Dict[str, Any] = Depends(get_current_user)):
+    from utils.relist_store import RelistStore
+    return {'events': RelistStore(db_manager).events(current_user['user_id'])}
+
+
+@app.delete('/api/auto-relist/rules/{rule_id}')
+def delete_auto_relist_rule(rule_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from utils.relist_store import RelistStore
+    try:
+        if not RelistStore(db_manager).delete(rule_id,current_user['user_id']):
+            raise HTTPException(status_code=404,detail='续售规则不存在')
+        return {'success':True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400,detail=str(exc))
+
+
+@app.post('/api/auto-relist/rules/{rule_id}/check')
+async def check_auto_relist_rule(rule_id: int, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from utils.relist_store import RelistStore
+    from auto_relist_task import AutoRelistService
+    if not RelistStore(db_manager).rule(rule_id,current_user['user_id']):
+        raise HTTPException(status_code=404, detail='续售规则不存在')
+    return {'results': await AutoRelistService(db_manager).run_once(current_user['user_id'], rule_id)}
+
+
+class RelistResultIn(BaseModel):
+    item_id: str = Field(min_length=1, max_length=128)
+
+
+@app.post('/api/auto-relist/events/{event_id}/associate')
+async def associate_auto_relist_result(event_id: int, request: RelistResultIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    from auto_relist_task import AutoRelistService
+    try:
+        state = await AutoRelistService(db_manager).associate_result(event_id,current_user['user_id'],request.item_id.strip())
+        return {'success': state == 'completed', 'state': state}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/product-materials")

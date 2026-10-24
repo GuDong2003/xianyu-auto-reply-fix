@@ -1116,6 +1116,8 @@ Cookie数量: {cookie_count}
             self._ensure_scheduled_red_flower_logs_table(cursor)
             self._ensure_scheduled_task_logs_table(cursor)
             self._ensure_product_publish_tables(cursor)
+            from utils.relist_store import initialize_relist_schema
+            initialize_relist_schema(cursor)
 
             # 迁移notification_templates表以支持新的模板类型
             self._migrate_notification_templates(cursor)

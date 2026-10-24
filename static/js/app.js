@@ -12743,6 +12743,9 @@ function displayCurrentPageItems() {
                 <button class="btn btn-sm ${isMultiQuantityDelivery ? 'btn-warning' : 'btn-success'}" onclick="toggleItemMultiQuantityDelivery('${escapeHtml(item.cookie_id)}', '${escapeHtml(item.item_id)}', ${!isMultiQuantityDelivery})" title="${isMultiQuantityDelivery ? '关闭多数量发货' : '开启多数量发货'}">
                     <i class="bi ${isMultiQuantityDelivery ? 'bi-box-arrow-down' : 'bi-box-arrow-up'}"></i>
                 </button>
+                <button class="btn btn-sm btn-outline-info" data-relist-account="${escapeHtml(item.cookie_id)}" data-relist-item="${escapeHtml(item.item_id)}" title="自动续售">
+                    <i class="bi bi-arrow-repeat"></i>
+                </button>
                 </div>
             </td>
             </tr>
@@ -12751,6 +12754,9 @@ function displayCurrentPageItems() {
 
     // 更新表格内容
     tbody.innerHTML = itemsHtml;
+    tbody.querySelectorAll('[data-relist-account]').forEach(button => {
+        button.addEventListener('click', () => showAutoRelistModal(button.dataset.relistAccount, button.dataset.relistItem));
+    });
 
     // 重置选择状态
     resetItemsSelection();

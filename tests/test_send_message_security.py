@@ -154,6 +154,50 @@ class SendMessageSecurityTests(unittest.TestCase):
                 self.assertEqual(self.send(user=user).status_code, 403)
         self.assert_no_account_access()
 
+    def test_item_sync_requires_login(self):
+        for endpoint in ('/items/get-all-from-account', '/items/get-by-page'):
+            response = self.client.post(endpoint, json={'cookie_id': 'owned-account'})
+            self.assertEqual(response.status_code, 401)
+        sys.modules['XianyuAutoAsync'].XianyuLive.assert_not_called()
+
+    def test_item_sync_denies_foreign_and_missing_accounts_before_cookie_lookup(self):
+        constructor = sys.modules['XianyuAutoAsync'].XianyuLive
+        with mock.patch.object(self.db, 'get_cookie_by_id', wraps=self.db.get_cookie_by_id) as lookup:
+            for endpoint in ('/items/get-all-from-account', '/items/get-by-page'):
+                for user, cookie_id in (
+                    ('other', 'owned-account'),
+                    ('admin', 'owned-account'),
+                    ('owner', 'missing-account'),
+                ):
+                    with self.subTest(endpoint=endpoint, user=user, cookie_id=cookie_id):
+                        response = self.client.post(
+                            endpoint, headers=self.headers(user), json={'cookie_id': cookie_id},
+                        )
+                        self.assertEqual(response.status_code, 403)
+            lookup.assert_not_called()
+        constructor.assert_not_called()
+
+    def test_owner_can_sync_own_account_with_normalized_id(self):
+        self.live.get_all_items = mock.AsyncMock(return_value={
+            'success': True, 'total_count': 1, 'total_pages': 1,
+        })
+        self.live.get_item_list_info = mock.AsyncMock(return_value={
+            'success': True, 'current_count': 1,
+        })
+        self.live.close_session = mock.AsyncMock()
+        constructor = sys.modules['XianyuAutoAsync'].XianyuLive
+        constructor.return_value = self.live
+        for endpoint in ('/items/get-all-from-account', '/items/get-by-page'):
+            response = self.client.post(
+                endpoint, headers=self.headers(), json={'cookie_id': ' owned-account '},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()['success'])
+            self.assertEqual(constructor.call_args.args[1], 'owned-account')
+        self.live.get_all_items.assert_awaited_once_with(sync_item_details=True)
+        self.live.get_item_list_info.assert_awaited_once_with(1, 20, sync_item_details=True)
+        self.assertEqual(self.live.close_session.await_count, 2)
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

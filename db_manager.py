@@ -626,12 +626,21 @@ class DBManager:
                 item_price TEXT,
                 item_detail TEXT,
                 is_multi_spec BOOLEAN DEFAULT FALSE,
+                is_listed BOOLEAN NOT NULL DEFAULT TRUE,
+                last_listing_seen_ns INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE,
                 UNIQUE(cookie_id, item_id)
             )
             ''')
+
+            cursor.execute('PRAGMA table_info(item_info)')
+            item_columns = {row[1] for row in cursor.fetchall()}
+            if 'is_listed' not in item_columns:
+                cursor.execute('ALTER TABLE item_info ADD COLUMN is_listed BOOLEAN NOT NULL DEFAULT TRUE')
+            if 'last_listing_seen_ns' not in item_columns:
+                cursor.execute('ALTER TABLE item_info ADD COLUMN last_listing_seen_ns INTEGER NOT NULL DEFAULT 0')
 
             # 检查并添加 multi_quantity_delivery 列（用于多数量发货功能）
             try:
@@ -6462,7 +6471,42 @@ Cookie数量: {cookie_count}
             logger.error(f"获取商品多数量发货状态失败: {e}")
             return False
 
-    def get_items_by_cookie(self, cookie_id: str) -> List[Dict]:
+    def mark_items_listed(self, cookie_id: str, item_ids) -> int:
+        """仅将实际在平台列表中见到的商品恢复为在售，不影响其他账号。"""
+        with self.lock, self.conn:
+            cursor = self.conn.cursor()
+            seen_ns = time.time_ns()
+            updated = 0
+            for item_id in set(item_ids):
+                cursor.execute('''
+                    UPDATE item_info SET is_listed = 1, last_listing_seen_ns = ?
+                    WHERE cookie_id = ? AND item_id = ?
+                ''', (seen_ns, cookie_id, str(item_id)))
+                updated += cursor.rowcount
+            return updated
+
+    def reconcile_item_listing(self, cookie_id: str, item_ids, started_ns: int) -> int:
+        """完整同步后软下架缺失商品；保留同步期间新观察到的记录及历史关联。"""
+        with self.lock, self.conn:
+            cursor = self.conn.cursor()
+            cursor.execute('CREATE TEMP TABLE IF NOT EXISTS item_listing_snapshot (item_id TEXT PRIMARY KEY)')
+            cursor.execute('DELETE FROM item_listing_snapshot')
+            cursor.executemany('INSERT INTO item_listing_snapshot VALUES (?)', ((str(x),) for x in set(item_ids)))
+            cursor.execute('''
+                UPDATE item_info SET is_listed = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE cookie_id = ? AND is_listed != 0
+                  AND last_listing_seen_ns <= ?
+                  AND item_id NOT IN (SELECT item_id FROM item_listing_snapshot)
+            ''', (cookie_id, started_ns))
+            unlisted_count = cursor.rowcount
+            cursor.execute('''
+                UPDATE item_info SET is_listed = 1
+                WHERE cookie_id = ? AND item_id IN (SELECT item_id FROM item_listing_snapshot)
+            ''', (cookie_id,))
+            cursor.execute('DELETE FROM item_listing_snapshot')
+            return unlisted_count
+
+    def get_items_by_cookie(self, cookie_id: str, listed_only: bool = False) -> List[Dict]:
         """获取指定Cookie的所有商品信息
 
         Args:
@@ -6476,9 +6520,9 @@ Cookie数量: {cookie_count}
                 cursor = self.conn.cursor()
                 cursor.execute('''
                 SELECT * FROM item_info
-                WHERE cookie_id = ?
+                WHERE cookie_id = ? AND (? = 0 OR is_listed != 0)
                 ORDER BY updated_at DESC
-                ''', (cookie_id,))
+                ''', (cookie_id, int(listed_only)))
 
                 columns = [description[0] for description in cursor.description]
                 items = []

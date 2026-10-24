@@ -12504,7 +12504,7 @@ async function loadCookieFilter(id) {
 // 加载所有商品
 async function loadAllItems() {
     try {
-    const response = await fetch(`${apiBase}/items`, {
+    const response = await fetch(`${apiBase}/items?include_unlisted=true`, {
         headers: {
         'Authorization': `Bearer ${authToken}`
         }
@@ -12532,7 +12532,7 @@ async function loadItemsByCookie() {
     }
 
     try {
-    const response = await fetch(`${apiBase}/items/cookie/${encodeURIComponent(cookieId)}`, {
+    const response = await fetch(`${apiBase}/items/cookie/${encodeURIComponent(cookieId)}?include_unlisted=true`, {
         headers: {
         'Authorization': `Bearer ${authToken}`
         }
@@ -12568,16 +12568,15 @@ function displayItems(items) {
 // 应用搜索过滤
 function applyItemsFilter() {
     const searchKeyword = currentSearchKeyword.toLowerCase().trim();
-
-    if (!searchKeyword) {
-        filteredItemsData = [...allItemsData];
-    } else {
-        filteredItemsData = allItemsData.filter(item => {
-            const title = (item.item_title || '').toLowerCase();
-            const detail = getItemDetailText(item.item_detail || '').toLowerCase();
-            return title.includes(searchKeyword) || detail.includes(searchKeyword);
-        });
-    }
+    const listingFilter = document.getElementById('itemListingFilter')?.value || 'listed';
+    filteredItemsData = allItemsData.filter(item => {
+        const listed = item.is_listed !== false && item.is_listed !== 0 && item.is_listed !== '0';
+        if (listingFilter === 'listed' && !listed) return false;
+        if (listingFilter === 'unlisted' && listed) return false;
+        const title = (item.item_title || '').toLowerCase();
+        const detail = getItemDetailText(item.item_detail || '').toLowerCase();
+        return !searchKeyword || title.includes(searchKeyword) || detail.includes(searchKeyword);
+    });
 
     // 重置到第一页
     currentItemsPage = 1;
@@ -12657,7 +12656,7 @@ function displayCurrentPageItems() {
             </td>
             <td>${escapeHtml(item.cookie_id)}</td>
             <td>${escapeHtml(item.item_id)}</td>
-            <td title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</td>
+            <td title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}${item.is_listed === false || item.is_listed === 0 || item.is_listed === '0' ? ' <span class="badge bg-secondary">非在售</span>' : ''}</td>
             <td title="${escapeHtml(getItemDetailText(item.item_detail || ''))}">${escapeHtml(itemDetailDisplay)}</td>
             <td>${escapeHtml(item.item_price || '未设置')}</td>
             <td>${multiSpecDisplay}</td>

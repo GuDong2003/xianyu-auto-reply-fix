@@ -39,6 +39,7 @@ from utils.notification_dispatcher import (
     render_notification_template,
 )
 from utils.item_pagination import normalize_item_list_page_size
+from utils.item_sync import sync_all_item_pages
 
 
 MANUAL_VERIFICATION_CONTEXTS = {
@@ -17917,7 +17918,6 @@ class XianyuLive:
         # 始终从最新的cookies中获取_m_h5_tk token（刷新后cookies会被更新）
         token = trans_cookies(self.cookies_str).get('_m_h5_tk', '').split('_')[0] if trans_cookies(self.cookies_str).get('_m_h5_tk') else ''
 
-        logger.warning(f"准备获取商品列表，token: {token}")
         if token:
             logger.warning(f"使用cookies中的_m_h5_tk token: {self._mask_secret_value(token, head=6, tail=4)}")
         else:
@@ -17945,16 +17945,20 @@ class XianyuLive:
                 if res_json.get('ret') and res_json['ret'][0] == 'SUCCESS::调用成功':
                     items_data = res_json.get('data', {})
                     # 从cardList中提取商品信息
-                    card_list = items_data.get('cardList', [])
+                    if not isinstance(items_data, dict) or not isinstance(items_data.get('cardList'), list):
+                        return {'success': False, 'error': '商品列表响应缺少有效 cardList，无法确认在售商品'}
+                    card_list = items_data['cardList']
 
                     # 解析cardList中的商品信息
                     items_list = []
                     for card in card_list:
+                        if not isinstance(card, dict):
+                            return {'success': False, 'error': '商品列表包含无效记录'}
                         card_data = card.get('cardData', {})
-                        if card_data:
+                        if isinstance(card_data, dict) and str(card_data.get('id') or '').strip():
                             # 提取商品基本信息
                             item_info = {
-                                'id': card_data.get('id', ''),
+                                'id': str(card_data.get('id') or '').strip(),
                                 'title': card_data.get('title', ''),
                                 'price': card_data.get('priceInfo', {}).get('price', ''),
                                 'price_text': card_data.get('priceInfo', {}).get('preText', '') + card_data.get('priceInfo', {}).get('price', ''),
@@ -17969,6 +17973,8 @@ class XianyuLive:
                                 'card_type': card.get('cardType', 0)
                             }
                             items_list.append(item_info)
+                        else:
+                            return {'success': False, 'error': '商品列表记录缺少商品ID，无法确认完整列表'}
 
                     logger.info(f"成功获取到 {len(items_list)} 个商品")
 
@@ -18003,6 +18009,28 @@ class XianyuLive:
                             sync_item_details=sync_item_details,
                         )
                         logger.info(f"已将 {saved_count} 个商品信息保存到数据库")
+                        if saved_count < len(items_list):
+                            return {'success': False, 'error': '商品未完整保存，未更新下架状态'}
+                        listed_count = db_manager.mark_items_listed(self.cookie_id, (item['id'] for item in items_list))
+                        if listed_count < len(items_list):
+                            return {'success': False, 'error': '商品在售状态未完整保存'}
+
+                    pagination = {}
+                    for field in ('hasNext', 'hasNextPage', 'nextPage'):
+                        if field in items_data:
+                            value = items_data[field]
+                            if value is True or str(value).lower() in ('true', '1'):
+                                pagination['has_next'] = True
+                            elif value is False or str(value).lower() in ('false', '0'):
+                                pagination['has_next'] = False
+                            else:
+                                return {'success': False, 'error': '平台商品分页标记无法识别'}
+                            break
+                    if 'totalCount' in items_data:
+                        try:
+                            pagination['total_count'] = int(items_data['totalCount'])
+                        except (TypeError, ValueError):
+                            return {'success': False, 'error': '平台商品总数无法识别'}
 
                     return {
                         "success": True,
@@ -18011,7 +18039,8 @@ class XianyuLive:
                         "current_count": len(items_list),
                         "items": items_list,
                         "saved_count": saved_count if items_list else 0,
-                        "raw_data": items_data  # 保留原始数据以备调试
+                        "raw_data": items_data,  # 保留原始数据以备调试
+                        **pagination,
                     }
                 else:
                     # 检查是否是token失效
@@ -18040,68 +18069,8 @@ class XianyuLive:
             )
 
     async def get_all_items(self, page_size=20, max_pages=None, sync_item_details=False):
-        """获取所有商品信息（自动分页）
-
-        Args:
-            page_size (int): 每页数量，默认20
-            max_pages (int): 最大页数限制，None表示无限制
-            sync_item_details (bool): 是否同步已存在商品的最新详情
-
-        Returns:
-            dict: 包含所有商品信息的字典
-        """
-        page_size = normalize_item_list_page_size(page_size)
-        all_items = []
-        page_number = 1
-        total_saved = 0
-
-        logger.info(f"开始获取所有商品信息，每页{page_size}条")
-
-        while True:
-            if max_pages and page_number > max_pages:
-                logger.info(f"达到最大页数限制 {max_pages}，停止获取")
-                break
-
-            logger.info(f"正在获取第 {page_number} 页...")
-            result = await self.get_item_list_info(
-                page_number,
-                page_size,
-                sync_item_details=sync_item_details,
-            )
-
-            if not result.get("success"):
-                logger.error(f"获取第 {page_number} 页失败: {result}")
-                break
-
-            current_items = result.get("items", [])
-            if not current_items:
-                logger.info(f"第 {page_number} 页没有数据，获取完成")
-                break
-
-            all_items.extend(current_items)
-            total_saved += result.get("saved_count", 0)
-
-            logger.info(f"第 {page_number} 页获取到 {len(current_items)} 个商品")
-
-            # 如果当前页商品数量少于页面大小，说明已经是最后一页
-            if len(current_items) < page_size:
-                logger.info(f"第 {page_number} 页商品数量({len(current_items)})少于页面大小({page_size})，获取完成")
-                break
-
-            page_number += 1
-
-            # 添加延迟避免请求过快
-            await asyncio.sleep(1)
-
-        logger.info(f"所有商品获取完成，共 {len(all_items)} 个商品，保存了 {total_saved} 个")
-
-        return {
-            "success": True,
-            "total_pages": page_number,
-            "total_count": len(all_items),
-            "total_saved": total_saved,
-            "items": all_items
-        }
+        """获取完整在售快照，仅在所有分页成功后对账下架状态。"""
+        return await sync_all_item_pages(self, db_manager, page_size, max_pages, sync_item_details)
 
     def _get_item_polish_module(self):
         from item_polish_module import ItemPolishModule

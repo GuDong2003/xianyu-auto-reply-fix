@@ -1507,8 +1507,7 @@ async def admin_page():
 
 
 # 登录接口
-@app.post('/login')
-async def login(login_request: LoginRequest, request: Request):
+async def _login_with_credentials(login_request: LoginRequest, request: Request):
     from db_manager import db_manager
     
     # 获取客户端IP（考虑代理）
@@ -1737,6 +1736,34 @@ async def login(login_request: LoginRequest, request: Request):
             success=False,
             message="请提供有效的登录信息"
         )
+
+
+@app.post('/login')
+async def login(login_request: LoginRequest, request: Request):
+    response = None
+    try:
+        response = await _login_with_credentials(login_request,request)
+        return response
+    finally:
+        try:
+            from utils.login_audit import record_login_result
+            record_login_result(db_manager,login_request,request,response)
+        except Exception:
+            logger.warning('登录审计记录未写入')
+
+
+@app.get('/api/login-audit/users')
+def list_user_login_audit(page:int=1,page_size:int=50,success:Optional[bool]=None,keyword:str='',
+                          admin:Dict[str,Any]=Depends(require_admin)):
+    from utils.login_audit import LoginAuditStore
+    return LoginAuditStore(db_manager).list_users(page,page_size,success,keyword)
+
+
+@app.get('/api/login-audit/accounts')
+def list_account_login_audit(page:int=1,page_size:int=50,success:Optional[bool]=None,keyword:str='',
+                             current_user:Dict[str,Any]=Depends(get_current_user)):
+    from utils.login_audit import LoginAuditStore
+    return LoginAuditStore(db_manager).list_accounts(current_user['user_id'],page,page_size,success,keyword)
 
 
 # 验证token接口

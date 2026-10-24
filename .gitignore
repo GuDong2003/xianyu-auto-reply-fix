@@ -830,4 +830,5 @@ test_php_stats.py
 !tests/test_notification_templates.py
 !tests/test_rate_followup.py
 !tests/test_auto_relist.py
+!tests/test_login_audit.py
 !docs/maintenance-progress.md

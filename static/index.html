@@ -649,6 +649,7 @@
                 <button class="btn btn-sm btn-outline-primary" onclick="loadCookies()">
                   <i class="bi bi-arrow-clockwise me-1"></i>刷新
                 </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="showLoginAudit('accounts')">账号登录记录</button>
               </div>
             </div>
           </div>
@@ -3773,6 +3774,7 @@
             <div class="card">
               <div class="card-header">
                 <i class="bi bi-shield-check me-2"></i>API安全设置
+                <button class="btn btn-sm btn-outline-primary ms-2" onclick="showLoginAudit('users')">系统登录记录</button>
                 <span class="badge bg-warning ms-2">管理员专用</span>
               </div>
               <div class="card-body">
@@ -5142,6 +5144,7 @@
   <script src="/static/lib/bootstrap/bootstrap.bundle.min.js"></script>
   <script src="/static/js/app.js?v=1.2.10"></script>
   <script src="/static/js/auto-relist.js?v=1.0.0"></script>
+  <script src="/static/js/login-audit.js?v=1.0.0"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">

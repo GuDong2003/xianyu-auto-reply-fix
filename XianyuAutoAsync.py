@@ -40,6 +40,7 @@ from utils.notification_dispatcher import (
 )
 from utils.item_pagination import normalize_item_list_page_size
 from utils.item_sync import sync_all_item_pages
+from utils.ai_item_context import build_ai_item_info
 
 
 MANUAL_VERIFICATION_CONTEXTS = {
@@ -10316,12 +10317,7 @@ class XianyuLive:
                     'desc': '暂无商品描述'
                 }
             else:
-                # 解析数据库中的商品信息
-                item_info = {
-                    'title': item_info_raw.get('item_title', '未知商品'),
-                    'price': self._parse_price(item_info_raw.get('item_price', '0')),
-                    'desc': item_info_raw.get('item_detail', '暂无商品描述')
-                }
+                item_info = build_ai_item_info(item_info_raw)
 
             # 生成AI回复
             # 由于外部已实现防抖机制，跳过内部等待（skip_wait=True）

@@ -628,6 +628,7 @@ class DBManager:
                 is_multi_spec BOOLEAN DEFAULT FALSE,
                 is_listed BOOLEAN NOT NULL DEFAULT TRUE,
                 last_listing_seen_ns INTEGER NOT NULL DEFAULT 0,
+                ai_prompt TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (cookie_id) REFERENCES cookies(id) ON DELETE CASCADE,
@@ -641,6 +642,8 @@ class DBManager:
                 cursor.execute('ALTER TABLE item_info ADD COLUMN is_listed BOOLEAN NOT NULL DEFAULT TRUE')
             if 'last_listing_seen_ns' not in item_columns:
                 cursor.execute('ALTER TABLE item_info ADD COLUMN last_listing_seen_ns INTEGER NOT NULL DEFAULT 0')
+            if 'ai_prompt' not in item_columns:
+                cursor.execute("ALTER TABLE item_info ADD COLUMN ai_prompt TEXT NOT NULL DEFAULT ''")
 
             # 检查并添加 multi_quantity_delivery 列（用于多数量发货功能）
             try:
@@ -6580,7 +6583,7 @@ Cookie数量: {cookie_count}
             logger.error(f"获取所有商品信息失败: {e}")
             return []
 
-    def update_item_detail(self, cookie_id: str, item_id: str, item_detail: str) -> bool:
+    def update_item_detail(self, cookie_id: str, item_id: str, item_detail: str, ai_prompt: Optional[str] = None) -> bool:
         """更新商品详情（不覆盖商品标题等基本信息）
 
         Args:
@@ -6595,11 +6598,15 @@ Cookie数量: {cookie_count}
             with self.lock:
                 cursor = self.conn.cursor()
                 # 只更新item_detail字段，不影响其他字段
-                cursor.execute('''
-                UPDATE item_info SET
-                    item_detail = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE cookie_id = ? AND item_id = ?
-                ''', (item_detail, cookie_id, item_id))
+                fields = ['item_detail = ?', 'updated_at = CURRENT_TIMESTAMP']
+                values = [item_detail]
+                if ai_prompt is not None:
+                    fields.append('ai_prompt = ?')
+                    values.append(ai_prompt)
+                cursor.execute(
+                    f"UPDATE item_info SET {', '.join(fields)} WHERE cookie_id = ? AND item_id = ?",
+                    (*values, cookie_id, item_id),
+                )
 
                 if cursor.rowcount > 0:
                     self.conn.commit()

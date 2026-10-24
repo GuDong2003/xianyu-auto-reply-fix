@@ -1120,6 +1120,8 @@ Cookie数量: {cookie_count}
             initialize_relist_schema(cursor)
             from utils.login_audit import initialize_login_audit_schema
             initialize_login_audit_schema(cursor)
+            from utils.ai_pause import initialize_ai_pause_schema
+            initialize_ai_pause_schema(cursor)
 
             # 迁移notification_templates表以支持新的模板类型
             self._migrate_notification_templates(cursor)

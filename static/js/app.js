@@ -6951,17 +6951,25 @@ async function clearDefaultReplyRecords(accountId) {
 }
 
 // ==================== AI回复配置相关函数 ====================
+let aiConfigLoadVersion = 0;
 
 // 配置AI回复
 async function configAIReply(accountId) {
+    const loadVersion = ++aiConfigLoadVersion;
     try {
     // 获取当前AI回复设置
-    const settings = await fetchJSON(`${apiBase}/ai-reply-settings/${accountId}`);
+    const [settings, manualPause] = await Promise.all([
+        fetchJSON(`${apiBase}/ai-reply-settings/${encodeURIComponent(accountId)}`),
+        fetchJSON(`${apiBase}/cookies/${encodeURIComponent(accountId)}/ai-manual-pause`)
+    ]);
+    if (loadVersion !== aiConfigLoadVersion) return;
 
     // 填充表单
     document.getElementById('aiConfigAccountId').value = accountId;
     document.getElementById('aiConfigAccountIdDisplay').value = accountId;
     document.getElementById('aiReplyEnabled').checked = settings.ai_enabled;
+    document.getElementById('aiManualPauseEnabled').checked = !!manualPause.enabled;
+    document.getElementById('aiManualPauseMinutes').value = manualPause.minutes || 10;
     // 处理模型名称
     const modelSelect = document.getElementById('aiModelName');
     const customModelInput = document.getElementById('customModelName');
@@ -6998,6 +7006,7 @@ async function configAIReply(accountId) {
     toggleAIReplySettings();
     updateApiUrlPreview();
     await loadAIPresets();
+    if (loadVersion !== aiConfigLoadVersion) return;
 
     // 显示模态框
     const modal = new bootstrap.Modal(document.getElementById('aiReplyConfigModal'));
@@ -7127,6 +7136,14 @@ async function saveAIReplyConfig() {
     });
 
     if (response.ok) {
+        const pauseResponse = await fetch(`${apiBase}/cookies/${encodeURIComponent(accountId)}/ai-manual-pause`, {
+            method:'PUT',headers:{'Content-Type':'application/json','Authorization':`Bearer ${authToken}`},
+            body:JSON.stringify({enabled:document.getElementById('aiManualPauseEnabled').checked,minutes:Number(document.getElementById('aiManualPauseMinutes').value)})
+        });
+        if (!pauseResponse.ok) {
+            showToast('AI主配置已保存，但人工暂停设置未保存，请检查时长后重试','warning');
+            return;
+        }
         showToast('AI回复配置保存成功', 'success');
         bootstrap.Modal.getInstance(document.getElementById('aiReplyConfigModal')).hide();
         loadCookies(); // 刷新账号列表以更新AI回复状态显示
@@ -23501,6 +23518,7 @@ async function selectChatSession(session) {
 
     renderChatSessions(chatSessionsCache);
     await loadChatMessages(false);
+    await refreshCurrentAiPause();
     if (chatCurrentToUserId) {
         refreshChatBlacklistStatus();
     }
@@ -23691,6 +23709,7 @@ async function sendChatMessage() {
         });
         if (result.success) {
             if (input) input.value = '';
+            await refreshCurrentAiPause();
         } else {
             showToast(result.detail || result.message || '发送失败', 'danger');
         }

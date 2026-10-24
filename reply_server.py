@@ -14580,6 +14580,67 @@ async def get_chat_messages(
         raise HTTPException(status_code=500, detail="获取聊天消息失败")
 
 
+class AiManualPauseConfigIn(BaseModel):
+    enabled: bool = False
+    minutes: int = Field(default=10,ge=1,le=1440)
+
+
+class ChatAiPauseIn(BaseModel):
+    cookie_id: str
+    chat_id: str
+    buyer_id: str = ''
+    item_id: str = ''
+    minutes: int = Field(default=10,ge=1,le=1440)
+    resume: bool = False
+
+
+@app.get('/cookies/{cid}/ai-manual-pause')
+def get_ai_manual_pause_config(cid:str,current_user:Dict[str,Any]=Depends(get_current_user)):
+    from utils.ai_pause import AIPauseStore
+    cid = _ensure_cookie_access(cid,current_user)
+    return AIPauseStore(db_manager).config(cid)
+
+
+@app.put('/cookies/{cid}/ai-manual-pause')
+def set_ai_manual_pause_config(cid:str,request:AiManualPauseConfigIn,current_user:Dict[str,Any]=Depends(get_current_user)):
+    from utils.ai_pause import AIPauseStore
+    cid = _ensure_cookie_access(cid,current_user)
+    AIPauseStore(db_manager).set_config(cid,request.enabled,request.minutes)
+    return {'success':True}
+
+
+@app.get('/api/chat/ai-pause')
+def get_chat_ai_pause(cookie_id:str,chat_id:str,buyer_id:str='',item_id:str='',current_user:Dict[str,Any]=Depends(get_current_user)):
+    from utils.ai_pause import AIPauseStore
+    cookie_id = _ensure_cookie_access(cookie_id,current_user)
+    store = AIPauseStore(db_manager)
+    context = store.context(cookie_id,chat_id,buyer_id,item_id)
+    overall_remaining = 0
+    try:
+        from XianyuAutoAsync import pause_manager
+        overall_remaining = pause_manager.get_remaining_pause_time(chat_id,cookie_id)
+    except ImportError:
+        pass
+    return {'remaining_seconds':store.remaining(cookie_id,*context) if context else 0,
+            'all_reply_pause_remaining':overall_remaining,
+            'buyer_id':context[0] if context else '', 'item_id':context[1] if context else ''}
+
+
+@app.post('/api/chat/ai-pause')
+def set_chat_ai_pause(request:ChatAiPauseIn,current_user:Dict[str,Any]=Depends(get_current_user)):
+    from utils.ai_pause import AIPauseStore
+    cookie_id = _ensure_cookie_access(request.cookie_id,current_user)
+    store = AIPauseStore(db_manager)
+    context = store.context(cookie_id,request.chat_id,request.buyer_id,request.item_id)
+    if not context:
+        raise HTTPException(status_code=400,detail='该会话尚无明确的买家和商品信息')
+    if request.resume:
+        store.resume(cookie_id,*context)
+    else:
+        store.pause(cookie_id,*context,request.minutes)
+    return {'success':True,'remaining_seconds':store.remaining(cookie_id,*context)}
+
+
 @app.post('/api/chat/send')
 async def chat_send_message(
     req: ChatSendRequest,
@@ -14619,6 +14680,12 @@ async def chat_send_message(
             ),
             timeout=15,
         )
+
+        try:
+            from XianyuAutoAsync import pause_manager
+            pause_manager.pause_after_manual_reply(req.chat_id,cookie_id,buyer_id=req.to_user_id)
+        except Exception:
+            logger.warning('手动发送完成，但暂停状态未更新')
 
         # 闲鱼通过 sendByReceiverScope 发出的消息，WebSocket 不会以"自己发出"形式
         # 稳定回推给同一连接，导致前端在线客服看不到自己刚发的消息。这里仿照

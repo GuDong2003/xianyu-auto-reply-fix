@@ -3070,8 +3070,11 @@
                       <strong id="chatHeaderName">-</strong>
                       <small class="text-muted ms-2" id="chatHeaderItemId"></small>
                       <div class="small text-muted mt-1" id="chatHeaderMeta"></div>
+                      <div class="small text-warning" id="chatAiPauseState"></div>
                     </div>
                     <div class="d-flex gap-1">
+                      <button class="btn btn-sm btn-outline-warning" onclick="setCurrentChatAiPause(false)" title="仅暂停当前商品的AI回复10分钟">暂停AI</button>
+                      <button class="btn btn-sm btn-outline-success" onclick="setCurrentChatAiPause(true)" title="恢复当前商品的AI回复">恢复AI</button>
                       <button class="btn btn-sm btn-outline-secondary" onclick="loadMoreChatMessages()" title="加载更多"><i class="bi bi-clock-history"></i></button>
                       <button class="btn btn-sm btn-outline-success" onclick="openOrdersFromChat()" title="跳转到订单页查看该买家的订单"><i class="bi bi-receipt"></i><span class="d-none d-xl-inline ms-1">订单</span></button>
                       <button class="btn btn-sm btn-outline-danger" onclick="toggleChatBlacklist()" title="拉黑当前买家" id="chatBlacklistBtn" disabled><i class="bi bi-person-slash"></i><span class="d-none d-xl-inline ms-1" id="chatBlacklistBtnText">拉黑</span></button>
@@ -5145,6 +5148,7 @@
   <script src="/static/js/app.js?v=1.2.10"></script>
   <script src="/static/js/auto-relist.js?v=1.0.0"></script>
   <script src="/static/js/login-audit.js?v=1.0.0"></script>
+  <script src="/static/js/ai-pause.js?v=1.0.0"></script>
 
   <!-- 默认回复管理模态框 -->
   <div class="modal fade" id="defaultReplyModal" tabindex="-1" aria-labelledby="defaultReplyModalLabel" aria-hidden="true">
@@ -5363,12 +5367,18 @@
                       <label class="form-check-label" for="aiReplyEnabled">
                         <strong>启用AI回复</strong>
                       </label>
-                      <small class="form-text text-muted d-block">启用后将自动禁用关键词匹配和默认回复</small>
+                      <small class="form-text text-muted d-block">按指定商品、关键词、默认回复、AI回复的顺序匹配</small>
                     </div>
                   </div>
                 </div>
 
                 <div id="aiReplySettings" class="ai-config-stack" style="display: none;">
+                  <div class="ai-config-block">
+                    <div class="form-check mb-2"><input class="form-check-input" type="checkbox" id="aiManualPauseEnabled"><label class="form-check-label" for="aiManualPauseEnabled">人工回复后仅暂停AI，关键词和默认回复继续</label></div>
+                    <label class="form-label" for="aiManualPauseMinutes">AI暂停分钟数</label>
+                    <input class="form-control" type="number" id="aiManualPauseMinutes" min="1" max="1440" value="10">
+                    <small class="text-muted">按账号、买家和商品分别暂停，重启后仍有效。在线客服中可立即恢复；已有整体暂停和过滤规则仍生效。</small>
+                  </div>
                   <div class="ai-config-block ai-preset-block">
                     <label class="form-label mb-1">API配置预设</label>
                     <small class="form-text text-muted d-block mb-2">保存常用配置，一键切换到不同供应商参数</small>

@@ -15,6 +15,7 @@ import threading
 from typing import List, Dict, Optional
 from loguru import logger
 from db_manager import db_manager
+from utils.ai_item_context import format_ai_item_context
 
 
 class AIReplyEngine:
@@ -444,9 +445,7 @@ class AIReplyEngine:
                 system_prompt = self._build_unified_system_prompt(custom_prompts, settings)
 
                 # 5. 构建商品信息
-                item_desc = f"商品标题: {item_info.get('title', '未知')}\n"
-                item_desc += f"商品价格: {item_info.get('price', '未知')}元\n"
-                item_desc += f"商品描述: {item_info.get('desc', '无')}"
+                item_desc = format_ai_item_context(item_info)
 
                 # 6. 构建对话历史字符串
                 context_str = ""

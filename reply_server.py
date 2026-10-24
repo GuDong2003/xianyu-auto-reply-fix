@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File, F
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Tuple, Optional, Dict, Any, Callable, Awaitable
 from pathlib import Path
 from urllib.parse import unquote
@@ -11148,6 +11148,7 @@ def get_item_detail(cookie_id: str, item_id: str, current_user: Dict[str, Any] =
 
 class ItemDetailUpdate(BaseModel):
     item_detail: str
+    ai_prompt: Optional[str] = Field(default=None, max_length=4000)
 
 
 @app.put("/items/{cookie_id}/{item_id}")
@@ -11167,7 +11168,7 @@ def update_item_detail(
         if cookie_id not in user_cookies:
             raise HTTPException(status_code=403, detail="无权限操作该Cookie")
 
-        success = db_manager.update_item_detail(cookie_id, item_id, update_data.item_detail)
+        success = db_manager.update_item_detail(cookie_id, item_id, update_data.item_detail, ai_prompt=update_data.ai_prompt)
         if success:
             return {"message": "商品详情更新成功"}
         else:
@@ -11402,6 +11403,7 @@ def delete_ai_config_preset(
 def test_ai_reply(cookie_id: str, test_data: dict, current_user: Dict[str, Any] = Depends(get_current_user)):
     """测试AI回复功能"""
     try:
+        cookie_id = _ensure_cookie_access(cookie_id, current_user)
         # 检查账号是否存在
         if cookie_manager.manager is None:
             raise HTTPException(status_code=500, detail='CookieManager 未就绪')

@@ -225,6 +225,41 @@ class SendMessageSecurityTests(unittest.TestCase):
         response = self.client.get('/items/owned-account/old-item', headers=self.headers())
         self.assertEqual(response.status_code, 200)
 
+    def test_item_ai_prompt_is_owned_and_preserved_during_detail_sync(self):
+        self.db.conn.execute('''INSERT OR REPLACE INTO item_info
+            (cookie_id, item_id, item_title) VALUES ('owned-account', 'ai-item', 'Synthetic item')''')
+        self.db.conn.commit()
+        endpoint = '/items/owned-account/ai-item'
+        for user in ('other', 'admin'):
+            response = self.client.put(endpoint, headers=self.headers(user), json={
+                'item_detail': 'Synthetic detail', 'ai_prompt': 'Synthetic item instructions',
+            })
+            self.assertEqual(response.status_code, 403)
+        response = self.client.put(endpoint, headers=self.headers(), json={
+            'item_detail': 'Synthetic detail', 'ai_prompt': 'Synthetic item instructions',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.db.update_item_detail('owned-account', 'ai-item', 'Synced description')
+        self.assertEqual(self.db.get_item_info('owned-account', 'ai-item')['ai_prompt'], 'Synthetic item instructions')
+        response = self.client.put(endpoint, headers=self.headers(), json={
+            'item_detail': 'Synthetic detail', 'ai_prompt': '',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.db.get_item_info('owned-account', 'ai-item')['ai_prompt'], '')
+
+    def test_item_ai_prompt_length_is_validated(self):
+        response = self.client.put('/items/owned-account/ai-item', headers=self.headers(), json={
+            'item_detail': 'Synthetic detail', 'ai_prompt': 'a' * 4001,
+        })
+        self.assertEqual(response.status_code, 422)
+
+    def test_ai_test_cannot_use_other_users_account(self):
+        with mock.patch.object(self.server.ai_reply_engine, 'generate_reply') as generate:
+            for user in ('other', 'admin'):
+                response = self.client.post('/ai-reply-test/owned-account', headers=self.headers(user), json={})
+                self.assertEqual(response.status_code, 403)
+            generate.assert_not_called()
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

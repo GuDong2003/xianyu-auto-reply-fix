@@ -12993,6 +12993,7 @@ async function editItem(cookieId, itemId) {
         document.getElementById('editItemCookieIdDisplay').value = item.cookie_id;
         document.getElementById('editItemIdDisplay').value = item.item_id;
         document.getElementById('editItemDetail').value = item.item_detail || '';
+        document.getElementById('editItemAiPrompt').value = item.ai_prompt || '';
 
         // 显示模态框
         const modal = new bootstrap.Modal(document.getElementById('editItemModal'));
@@ -13025,7 +13026,8 @@ async function saveItemDetail() {
         'Authorization': `Bearer ${authToken}`
         },
         body: JSON.stringify({
-        item_detail: itemDetail
+        item_detail: itemDetail,
+        ai_prompt: document.getElementById('editItemAiPrompt').value.trim()
         })
     });
 

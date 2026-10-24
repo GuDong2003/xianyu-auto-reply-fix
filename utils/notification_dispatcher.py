@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import aiohttp
 from loguru import logger
+from utils.notification_templates import render_channel_template
 
 
 SUPPORTED_NOTIFICATION_TEMPLATE_TYPES = (
@@ -124,7 +125,9 @@ def parse_notification_config(config: Any) -> Dict[str, Any]:
 
     try:
         if isinstance(config, str):
-            return json.loads(config)
+            parsed = json.loads(config)
+            if isinstance(parsed, dict):
+                return parsed
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -516,8 +519,14 @@ async def send_channel_notification(channel_type: Any, config_data: Dict[str, An
     return False
 
 
-async def dispatch_notifications(notifications: Iterable[Dict[str, Any]], message: str, *, title: str = '闲鱼管理系统通知', notification_type: str = 'info', attachment_path: Optional[str] = None, account_id: str = '') -> bool:
+async def dispatch_notifications(notifications: Iterable[Dict[str, Any]], message: str, *, title: str = '闲鱼管理系统通知', notification_type: str = 'info', attachment_path: Optional[str] = None, account_id: str = '', template_context: Optional[Dict[str, Any]] = None) -> bool:
     notification_sent = False
+    context = {
+        'account_id': account_id, 'account': account_id, 'message': message, 'detail': message,
+        'title': title, 'notification_type': notification_type, 'time': time.strftime('%Y-%m-%d %H:%M:%S'),
+        **(template_context or {}),
+    }
+    context.setdefault('buyer_nick', context.get('buyer_name'))
 
     for notification in notifications or []:
         if not notification.get('enabled', True):
@@ -528,10 +537,11 @@ async def dispatch_notifications(notifications: Iterable[Dict[str, Any]], messag
         channel_config = notification.get('channel_config') if 'channel_config' in notification else notification.get('config')
         try:
             config_data = parse_notification_config(channel_config)
+            channel_message = render_channel_template(config_data, notification_type, context, message)
             channel_sent = await send_channel_notification(
                 channel_type,
                 config_data,
-                message,
+                channel_message,
                 title=title,
                 notification_type=notification_type,
                 attachment_path=attachment_path,
@@ -545,7 +555,7 @@ async def dispatch_notifications(notifications: Iterable[Dict[str, Any]], messag
     return notification_sent
 
 
-async def dispatch_account_notifications(account_id: str, message: str, *, title: str = '闲鱼管理系统通知', notification_type: str = 'info', attachment_path: Optional[str] = None) -> bool:
+async def dispatch_account_notifications(account_id: str, message: str, *, title: str = '闲鱼管理系统通知', notification_type: str = 'info', attachment_path: Optional[str] = None, template_context: Optional[Dict[str, Any]] = None) -> bool:
     from db_manager import db_manager
 
     try:
@@ -565,10 +575,11 @@ async def dispatch_account_notifications(account_id: str, message: str, *, title
         notification_type=notification_type,
         attachment_path=attachment_path,
         account_id=account_id,
+        template_context=template_context,
     )
 
 
-def dispatch_account_notifications_sync(account_id: str, message: str, *, title: str = '闲鱼管理系统通知', notification_type: str = 'info', attachment_path: Optional[str] = None) -> bool:
+def dispatch_account_notifications_sync(account_id: str, message: str, *, title: str = '闲鱼管理系统通知', notification_type: str = 'info', attachment_path: Optional[str] = None, template_context: Optional[Dict[str, Any]] = None) -> bool:
     result: Dict[str, bool] = {'sent': False}
 
     async def runner() -> None:
@@ -578,6 +589,7 @@ def dispatch_account_notifications_sync(account_id: str, message: str, *, title:
             title=title,
             notification_type=notification_type,
             attachment_path=attachment_path,
+            template_context=template_context,
         )
 
     def thread_main() -> None:

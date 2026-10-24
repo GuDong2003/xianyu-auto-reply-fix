@@ -260,6 +260,25 @@ class SendMessageSecurityTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 403)
             generate.assert_not_called()
 
+    def test_channel_templates_validate_and_remain_user_scoped(self):
+        import json
+        payload = {'name': 'Synthetic channel', 'type': 'webhook', 'config': json.dumps({
+            'webhook_url': 'https://example.invalid/notify', 'message_template': '{unsupported}',
+        })}
+        response = self.client.post('/notification-channels', headers=self.headers(), json=payload)
+        self.assertEqual(response.status_code, 400)
+        payload['config'] = json.dumps({
+            'webhook_url': 'https://example.invalid/notify', 'message_template': '{account_id}: {message}',
+        })
+        response = self.client.post('/notification-channels', headers=self.headers(), json=payload)
+        self.assertEqual(response.status_code, 200)
+        channel_id = response.json()['id']
+        endpoint = f'/notification-channels/{channel_id}'
+        response = self.client.put(endpoint, headers=self.headers('other'), json=payload)
+        self.assertEqual(response.status_code, 404)
+        response = self.client.get(endpoint, headers=self.headers())
+        self.assertEqual(json.loads(response.json()['config'])['message_template'], '{account_id}: {message}')
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

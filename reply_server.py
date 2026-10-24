@@ -41,6 +41,7 @@ from utils.qr_login_lite import qrcode_login_lite
 from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
 from utils.item_pagination import MAX_ITEM_LIST_PAGE_SIZE
+from utils.item_sync import ItemSyncInProgress, item_sync_slot
 from utils.product_sku import ProductSkuValidationError, normalize_sku_config
 from utils.time_utils import (
     LOCAL_TIMEZONE,
@@ -10134,7 +10135,7 @@ def reload_cache(current_user: Dict[str, Any] = Depends(get_current_user)):
 # ==================== 商品管理 API ====================
 
 @app.get("/items")
-def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
+def get_all_items(include_unlisted: bool = False, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取当前用户的所有商品信息"""
     try:
         # 只返回当前用户的商品信息
@@ -10144,7 +10145,7 @@ def get_all_items(current_user: Dict[str, Any] = Depends(get_current_user)):
 
         all_items = []
         for cookie_id in user_cookies.keys():
-            items = db_manager.get_items_by_cookie(cookie_id)
+            items = db_manager.get_items_by_cookie(cookie_id, listed_only=not include_unlisted)
             all_items.extend(items)
 
         return {"items": all_items}
@@ -11104,7 +11105,7 @@ async def publish_item(
 
 
 @app.get("/items/cookie/{cookie_id}")
-def get_items_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+def get_items_by_cookie(cookie_id: str, include_unlisted: bool = False, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取指定Cookie的商品信息"""
     try:
         # 检查cookie是否属于当前用户
@@ -11115,7 +11116,7 @@ def get_items_by_cookie(cookie_id: str, current_user: Dict[str, Any] = Depends(g
         if cookie_id not in user_cookies:
             raise HTTPException(status_code=403, detail="无权限访问该Cookie")
 
-        items = db_manager.get_items_by_cookie(cookie_id)
+        items = db_manager.get_items_by_cookie(cookie_id, listed_only=not include_unlisted)
         return {"items": items}
     except HTTPException:
         raise
@@ -11666,21 +11667,27 @@ async def get_all_items_from_account(request: dict, current_user: Dict[str, Any]
 
         # 调用获取所有商品信息的方法（自动分页）并同步最新商品详情
         logger.info(f"开始同步账号 {cookie_id} 的所有商品信息和最新详情")
-        result = await xianyu_instance.get_all_items(sync_item_details=True)
+        try:
+            result = await xianyu_instance.get_all_items(sync_item_details=True)
+        finally:
+            await xianyu_instance.close_session()
 
-        # 关闭session
-        await xianyu_instance.close_session()
-
-        if result.get('error'):
-            logger.error(f"获取商品信息失败: {result['error']}")
-            return {"success": False, "message": result['error']}
+        if not result.get('success'):
+            return {
+                'success': False, 'complete': False, 'partial': result.get('partial', False),
+                'message': result.get('error') or '商品同步未完成，未更新下架状态',
+                'total_count': result.get('total_count', 0),
+                'total_pages': result.get('total_pages', 0),
+            }
         else:
             total_count = result.get('total_count', 0)
             total_pages = result.get('total_pages', 1)
             logger.info(f"成功同步账号 {cookie_id} 的 {total_count} 个商品（共{total_pages}页）")
             return {
                 "success": True,
-                "message": f"成功同步 {total_count} 个商品（共{total_pages}页），最新商品详情已更新",
+                "message": f"成功同步 {total_count} 个商品（共{total_pages}页），{result.get('unlisted_count', 0)} 个历史商品标记为非在售",
+                "complete": True,
+                "unlisted_count": result.get('unlisted_count', 0),
                 "total_count": total_count,
                 "total_pages": total_pages
             }
@@ -11730,18 +11737,15 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
 
         # 创建XianyuLive实例，传入正确的cookie_id
         from XianyuAutoAsync import XianyuLive
-        xianyu_instance = XianyuLive(cookies_str, cookie_id, register_instance=False)
+        with item_sync_slot(cookie_id):
+            xianyu_instance = XianyuLive(cookies_str, cookie_id, register_instance=False)
+            try:
+                result = await xianyu_instance.get_item_list_info(page_number, page_size, sync_item_details=True)
+            finally:
+                await xianyu_instance.close_session()
 
-        # 调用获取指定页商品信息的方法并同步最新商品详情
-        logger.info(f"开始同步账号 {cookie_id} 第{page_number}页商品信息和最新详情（每页{page_size}条）")
-        result = await xianyu_instance.get_item_list_info(page_number, page_size, sync_item_details=True)
-
-        # 关闭session
-        await xianyu_instance.close_session()
-
-        if result.get('error'):
-            logger.error(f"获取商品信息失败: {result['error']}")
-            return {"success": False, "message": result['error']}
+        if not result.get('success'):
+            return {'success': False, 'message': result.get('error') or '商品分页同步失败'}
         else:
             current_count = result.get('current_count', 0)
             logger.info(f"成功同步账号 {cookie_id} 第{page_number}页 {current_count} 个商品")
@@ -11753,6 +11757,8 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
                 "current_count": current_count
             }
 
+    except ItemSyncInProgress as e:
+        return {'success': False, 'message': str(e)}
     except HTTPException:
         raise
     except Exception as e:

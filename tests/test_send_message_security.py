@@ -198,6 +198,33 @@ class SendMessageSecurityTests(unittest.TestCase):
         self.live.get_item_list_info.assert_awaited_once_with(1, 20, sync_item_details=True)
         self.assertEqual(self.live.close_session.await_count, 2)
 
+    def test_item_sync_failure_closes_session_and_does_not_report_success(self):
+        self.live.get_all_items = mock.AsyncMock(return_value={
+            'success': False, 'partial': True, 'total_count': 20, 'error': 'Synthetic failure',
+        })
+        self.live.get_item_list_info = mock.AsyncMock(side_effect=RuntimeError('Synthetic failure'))
+        self.live.close_session = mock.AsyncMock()
+        sys.modules['XianyuAutoAsync'].XianyuLive.return_value = self.live
+        for endpoint in ('/items/get-all-from-account', '/items/get-by-page'):
+            response = self.client.post(endpoint, headers=self.headers(), json={'cookie_id': 'owned-account'})
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json()['success'])
+        self.assertEqual(self.live.close_session.await_count, 2)
+
+    def test_item_lists_hide_unlisted_by_default_and_keep_details_accessible(self):
+        self.db.conn.execute('''INSERT OR REPLACE INTO item_info
+            (cookie_id, item_id, item_title, is_listed) VALUES ('owned-account', 'old-item', 'Old item', 0)''')
+        self.db.conn.commit()
+        for endpoint in ('/items', '/items/cookie/owned-account'):
+            response = self.client.get(endpoint, headers=self.headers())
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('old-item', [item['item_id'] for item in response.json()['items']])
+            response = self.client.get(endpoint + '?include_unlisted=true', headers=self.headers())
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('old-item', [item['item_id'] for item in response.json()['items']])
+        response = self.client.get('/items/owned-account/old-item', headers=self.headers())
+        self.assertEqual(response.status_code, 200)
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

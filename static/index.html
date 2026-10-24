@@ -1097,7 +1097,15 @@
               </div>
             </div>
 
-            <p class="text-muted small mb-0">“同步指定页 / 同步所有页”会从闲鱼拉取最新商品详情；“刷新列表”只重载本地数据库内容。</p>
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <label for="itemListingFilter" class="form-label mb-0">商品状态</label>
+              <select id="itemListingFilter" class="form-select form-select-sm w-auto" onchange="filterItems()">
+                <option value="listed">在售商品</option>
+                <option value="unlisted">非在售商品</option>
+                <option value="all">所有商品</option>
+              </select>
+            </div>
+            <p class="text-muted small mb-0">完整同步所有页后，平台未返回的旧商品会标记为非在售并保留历史关联；分页失败不会更新下架状态。“刷新列表”只重载本地内容。</p>
 
           </div>
         </div>

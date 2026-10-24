@@ -11649,6 +11649,8 @@ async def get_all_items_from_account(request: dict, current_user: Dict[str, Any]
         if not cookie_id:
             return {"success": False, "message": "缺少cookie_id参数"}
 
+        cookie_id = _ensure_cookie_access(cookie_id, current_user)
+
         # 获取指定账号的cookie信息
         cookie_info = db_manager.get_cookie_by_id(cookie_id)
         if not cookie_info:
@@ -11683,6 +11685,8 @@ async def get_all_items_from_account(request: dict, current_user: Dict[str, Any]
                 "total_pages": total_pages
             }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"获取账号商品信息异常: {str(e)}")
         return {"success": False, "message": f"获取商品信息异常: {str(e)}"}
@@ -11699,6 +11703,8 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
 
         if not cookie_id:
             return {"success": False, "message": "缺少cookie_id参数"}
+
+        cookie_id = _ensure_cookie_access(cookie_id, current_user)
 
         # 验证分页参数
         try:
@@ -11747,6 +11753,8 @@ async def get_items_by_page(request: dict, current_user: Dict[str, Any] = Depend
                 "current_count": current_count
             }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"获取账号商品信息异常: {str(e)}")
         return {"success": False, "message": f"获取商品信息异常: {str(e)}"}

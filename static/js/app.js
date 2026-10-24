@@ -6183,6 +6183,18 @@ async function showCommentTemplates(accountId) {
                                     </div>
                                 </div>
                             </div>
+                            <div class="card mb-3">
+                                <div class="card-body">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox" id="rateThanksEnabled">
+                                        <label class="form-check-label" for="rateThanksEnabled">评价买家成功后发送消息</label>
+                                    </div>
+                                    <textarea class="form-control mb-2" id="rateThanksContent" rows="3" maxlength="2000"
+                                              placeholder="填写致谢或售后说明，默认关闭"></textarea>
+                                    <p class="text-muted small">每笔订单最多自动提交一次。收件人或会话信息缺失时跳过；发送结果不明确时不会自动重发，可在任务日志中查看。</p>
+                                    <button class="btn btn-outline-primary btn-sm" onclick="saveRateThanksConfig()">保存消息设置</button>
+                                </div>
+                            </div>
                             <div id="templatesList">
                                 ${templatesHtml}
                             </div>
@@ -6220,12 +6232,45 @@ async function showCommentTemplates(accountId) {
             const modal = new bootstrap.Modal(document.getElementById('commentTemplatesModal'));
             modal.show();
         }
+        await loadRateThanksConfig(accountId);
         
     } catch (error) {
         console.error('获取好评模板失败:', error);
         showToast('获取好评模板失败: ' + error.message, 'error');
     } finally {
         toggleLoading(false);
+    }
+}
+
+async function loadRateThanksConfig(accountId) {
+    const response = await fetch(`${apiBase}/cookies/${encodeURIComponent(accountId)}/rate-thanks`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+    });
+    if (!response.ok) throw new Error('获取好评后消息设置失败');
+    const config = await response.json();
+    if (currentCommentTemplateAccountId !== accountId) return;
+    document.getElementById('rateThanksEnabled').checked = !!config.enabled;
+    document.getElementById('rateThanksContent').value = config.content || '';
+}
+
+async function saveRateThanksConfig() {
+    const accountId = currentCommentTemplateAccountId;
+    const enabled = document.getElementById('rateThanksEnabled').checked;
+    const content = document.getElementById('rateThanksContent').value.trim();
+    if (enabled && !content) {
+        showToast('启用前请填写消息内容', 'warning');
+        return;
+    }
+    try {
+        const response = await fetch(`${apiBase}/cookies/${encodeURIComponent(accountId)}/rate-thanks`, {
+            method: 'PUT', headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled, content })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '保存失败');
+        showToast('好评后消息设置已保存', 'success');
+    } catch (error) {
+        showToast(error.message || '保存失败', 'danger');
     }
 }
 

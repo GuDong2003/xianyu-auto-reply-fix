@@ -279,6 +279,20 @@ class SendMessageSecurityTests(unittest.TestCase):
         response = self.client.get(endpoint, headers=self.headers())
         self.assertEqual(json.loads(response.json()['config'])['message_template'], '{account_id}: {message}')
 
+    def test_rate_thanks_config_defaults_off_and_is_owned(self):
+        endpoint = '/cookies/owned-account/rate-thanks'
+        self.db.set_rate_thanks_config('owned-account', False, '')
+        self.assertFalse(self.client.get(endpoint, headers=self.headers()).json()['enabled'])
+        for user in ('other', 'admin'):
+            self.assertEqual(self.client.get(endpoint, headers=self.headers(user)).status_code, 403)
+            response = self.client.put(endpoint, headers=self.headers(user), json={'enabled': True, 'content': 'Thanks'})
+            self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.put(endpoint, headers=self.headers(), json={'enabled': True, 'content': ''}).status_code, 400)
+        self.assertEqual(self.client.put(endpoint, headers=self.headers(), json={'enabled': True, 'content': 'a' * 2001}).status_code, 422)
+        response = self.client.put(endpoint, headers=self.headers(), json={'enabled': True, 'content': 'Thanks'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get(endpoint, headers=self.headers()).json(), {'enabled': True, 'content': 'Thanks'})
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

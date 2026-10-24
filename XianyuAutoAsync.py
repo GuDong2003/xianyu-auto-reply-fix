@@ -3288,6 +3288,8 @@ class XianyuLive:
 
             if result.get('success'):
                 db_manager.mark_order_rated(order_id, True)
+                from utils.rate_followup import send_rate_thanks
+                await send_rate_thanks(self.cookie_id, order_id, live_instance=self)
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 订单 {order_id} 自动好评成功')
                 return True
             else:

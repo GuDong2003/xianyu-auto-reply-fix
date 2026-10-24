@@ -8679,6 +8679,29 @@ def get_auto_comment(cid: str, current_user: Dict[str, Any] = Depends(get_curren
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RateThanksConfigIn(BaseModel):
+    enabled: bool = False
+    content: str = Field(default='', max_length=2000)
+
+
+@app.get('/cookies/{cid}/rate-thanks')
+def get_rate_thanks_config(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    cid = _ensure_cookie_access(cid, current_user)
+    config = db_manager.get_rate_thanks_config(cid)
+    return {'enabled': bool(config.get('enabled')), 'content': config.get('content', '')}
+
+
+@app.put('/cookies/{cid}/rate-thanks')
+def update_rate_thanks_config(cid: str, config: RateThanksConfigIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    cid = _ensure_cookie_access(cid, current_user)
+    content = config.content.strip()
+    if config.enabled and not content:
+        raise HTTPException(status_code=400, detail='启用好评后消息前请填写消息内容')
+    if not db_manager.set_rate_thanks_config(cid, config.enabled, content):
+        raise HTTPException(status_code=400, detail='保存好评后消息设置失败')
+    return {'success': True}
+
+
 @app.get("/cookies/{cid}/comment-templates")
 def get_comment_templates(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """获取账号的好评模板列表"""
@@ -13809,6 +13832,8 @@ async def batch_rate_historical_orders(
                         account_result['rated_count'] += 1
                         stats['total_rated'] += 1
                         db_manager.mark_order_rated(order_id, True)
+                        from utils.rate_followup import send_rate_thanks
+                        await send_rate_thanks(cookie_id, order_id)
                     else:
                         account_result['failed_count'] += 1
                         stats['total_failed'] += 1

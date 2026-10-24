@@ -15,6 +15,7 @@ from loguru import logger
 
 from db_manager import db_manager
 from utils.rate_service import RateService
+from utils.rate_followup import send_rate_thanks
 
 
 DEFAULT_INTERVAL_SECONDS = int(os.getenv("AUTO_RATE_TASK_INTERVAL_SECONDS", "300") or 300)
@@ -61,6 +62,7 @@ async def rate_order_once(
         return {"success": False, "message": message, "status": "skipped"}
 
     if order_info.get("is_rated"):
+        await send_rate_thanks(cookie_id, order_id)
         message = "订单已标记为已评价"
         db_manager.add_scheduled_rate_log(
             batch_id, cookie_id, order_id=order_id, item_id=order_info.get("item_id"),
@@ -111,6 +113,7 @@ async def rate_order_once(
 
     if result.get("success"):
         db_manager.mark_order_rated(order_id, True)
+        await send_rate_thanks(cookie_id, order_id)
     else:
         db_manager.mark_order_rated(order_id, False, message)
 

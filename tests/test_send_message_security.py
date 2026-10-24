@@ -315,6 +315,25 @@ class SendMessageSecurityTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/auto-relist/rules',headers=self.headers('other')).json()['rules'],[])
         self.assertEqual(self.client.delete(endpoint,headers=self.headers()).status_code,200)
 
+    def test_login_results_are_audited_and_only_admin_can_read_system_attempts(self):
+        outcome = self.server.LoginResponse(success=True,token='synthetic-login-token',message='登录成功',user_id=self.owner_id)
+        with mock.patch.object(self.server,'_login_with_credentials',new=mock.AsyncMock(return_value=outcome)):
+            response = self.client.post('/login',json={'username':'synthetic-audit-user','password':'synthetic-password'})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(self.client.get('/api/login-audit/users',headers=self.headers()).status_code,403)
+        response = self.client.get('/api/login-audit/users?keyword=synthetic-audit-user',headers=self.headers('admin'))
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(response.json()['items'][0]['success'])
+        self.assertNotIn('synthetic-login-token',str(response.json()))
+
+    def test_audit_write_failure_does_not_break_login(self):
+        outcome = self.server.LoginResponse(success=True,token='synthetic-login-token',message='登录成功',user_id=self.owner_id)
+        with mock.patch.object(self.server,'_login_with_credentials',new=mock.AsyncMock(return_value=outcome)), \
+             mock.patch('utils.login_audit.LoginAuditStore.record',side_effect=OSError('synthetic failure')):
+            response = self.client.post('/login',json={'username':'synthetic','password':'synthetic-password'})
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(response.json()['success'])
+
     def test_missing_and_foreign_accounts_have_same_denial(self):
         foreign = self.send(user='other')
         missing = self.send(cookie_id='missing-account')

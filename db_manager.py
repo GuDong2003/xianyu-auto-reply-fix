@@ -1095,9 +1095,23 @@ Cookie数量: {cookie_count}
                 cursor.execute("ALTER TABLE cookies ADD COLUMN auto_red_flower INTEGER DEFAULT 0")
                 logger.info("数据库迁移完成：添加auto_red_flower列")
 
+            for name, definition in (
+                ('rate_thanks_enabled', 'INTEGER NOT NULL DEFAULT 0'),
+                ('rate_thanks_content', "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in cookie_columns:
+                    cursor.execute(f'ALTER TABLE cookies ADD COLUMN {name} {definition}')
+
             # 历史版本可能缺少订单平台时间字段，不能再依赖旧版本号分支触发
             self._ensure_orders_platform_time_columns(cursor)
             self._ensure_orders_auto_comment_columns(cursor)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS rate_thanks_messages (
+                cookie_id TEXT NOT NULL, order_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'sending', error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (cookie_id, order_id)
+            )''')
             self._ensure_scheduled_rate_logs_table(cursor)
             self._ensure_scheduled_red_flower_logs_table(cursor)
             self._ensure_scheduled_task_logs_table(cursor)
@@ -2765,6 +2779,44 @@ Cookie数量: {cookie_count}
             except Exception as e:
                 logger.error(f"更新自动好评设置失败: {e}")
                 return False
+
+    def get_rate_thanks_config(self, cookie_id: str) -> Dict[str, Any]:
+        with self.lock:
+            row = self.conn.execute('''SELECT rate_thanks_enabled, rate_thanks_content, user_id
+                FROM cookies WHERE id = ?''', (cookie_id,)).fetchone()
+            return {'enabled': bool(row[0]), 'content': row[1] or '', 'user_id': row[2]} if row else {}
+
+    def set_rate_thanks_config(self, cookie_id: str, enabled: bool, content: str) -> bool:
+        with self.lock, self.conn:
+            cursor = self.conn.execute('''UPDATE cookies SET rate_thanks_enabled = ?, rate_thanks_content = ?
+                WHERE id = ?''', (int(enabled), content, cookie_id))
+            return cursor.rowcount > 0
+
+    def claim_rate_thanks(self, cookie_id: str, order_id: str) -> Optional[str]:
+        """只有已评价且属于该账号的订单能领取一次发送资格，重启后仍防重复。"""
+        import uuid
+        attempt_id = uuid.uuid4().hex
+        with self.lock, self.conn:
+            cursor = self.conn.execute('''INSERT OR IGNORE INTO rate_thanks_messages (cookie_id, order_id, attempt_id)
+                SELECT cookie_id, order_id, ? FROM orders
+                WHERE order_id = ? AND cookie_id = ? AND is_rated = 1
+            ''', (attempt_id, order_id, cookie_id))
+            return attempt_id if cursor.rowcount == 1 else None
+
+    def finish_rate_thanks(self, cookie_id: str, order_id: str, attempt_id: str, status: str, error_message: str = '') -> bool:
+        if status not in {'sent', 'unknown'}:
+            raise ValueError('无效的好评后消息状态')
+        with self.lock, self.conn:
+            cursor = self.conn.execute('''UPDATE rate_thanks_messages SET status = ?, error_message = ?,
+                updated_at = CURRENT_TIMESTAMP WHERE cookie_id = ? AND order_id = ? AND attempt_id = ? AND status = 'sending'
+            ''', (status, error_message, cookie_id, order_id, attempt_id))
+            return cursor.rowcount == 1
+
+    def get_rate_thanks_state(self, cookie_id: str, order_id: str) -> Optional[str]:
+        with self.lock:
+            row = self.conn.execute('SELECT status FROM rate_thanks_messages WHERE cookie_id = ? AND order_id = ?',
+                                    (cookie_id, order_id)).fetchone()
+            return row[0] if row else None
 
     def get_comment_templates(self, cookie_id: str) -> List[Dict]:
         """获取账号的好评模板列表"""

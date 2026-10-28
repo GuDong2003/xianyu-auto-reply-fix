@@ -14,6 +14,20 @@
 
 > **⚠️ 重要提示：本项目采用 AGPL-3.0 开源协议，仅供学习研究使用，请勿用于违法违规场景。使用前请仔细阅读[版权声明](#️-版权声明与使用条款)。**
 
+## 🤝 赞助合作
+
+本项目接受赞助合作，如有意向可[联系我](mailto:contact@gudong226.com)进一步沟通。
+
+<p align="center">
+  <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
+  <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
+  <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
+</p>
+
+<p align="center">
+  <sub>排名不分先后</sub>
+</p>
+
 ## ✨ 核心特性
 
 - **多用户系统**：支持注册登录、邮箱验证、图形验证码、权限控制和用户数据隔离。

@@ -219,6 +219,14 @@ docker compose up -d
 - **[syunnrai123](https://github.com/syunnrai123)**、**[1205747671](https://github.com/1205747671)** - 为当前项目的滑块处理方案提供思路与参考
 - **[Mangor2021](https://github.com/Mangor2021)**、**[3281341052](https://github.com/3281341052)**、**[GDWhisper](https://github.com/GDWhisper)**、**[82762294](https://github.com/82762294)**、**[iidamie](https://github.com/iidamie)**、**[Roverlo](https://github.com/Roverlo)** - 为项目开发与改进提供实际贡献
 
+### Contributors
+
+<p align="center">
+  <a href="https://github.com/GuDong2003/xianyu-auto-reply-fix/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=GuDong2003/xianyu-auto-reply-fix&amp;max=100" alt="Contributors" />
+  </a>
+</p>
+
 ## ⚖️ 版权声明与使用条款
 
 本项目基于原项目整理和修复，采用 **GNU Affero General Public License v3.0（AGPL-3.0）** 开源协议。项目定位为学习与研究使用，请勿用于任何违法违规场景。
@@ -228,14 +236,6 @@ docker compose up -d
 本项目是社区维护的非官方项目，与闲鱼、阿里巴巴及其关联公司无隶属、授权、认可或合作关系。平台接口、风控规则和页面结构可能随时变化，由此导致的功能中断不构成维护者承诺。
 
 本项目按“现状”提供，不提供任何明示或暗示的保证；因使用本项目产生的风险、损失或责任，由使用者自行承担。
-
-## Contributors
-
-<p align="center">
-  <a href="https://github.com/GuDong2003/xianyu-auto-reply-fix/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=GuDong2003/xianyu-auto-reply-fix&amp;max=100" alt="Contributors" />
-  </a>
-</p>
 
 ## Star History
 

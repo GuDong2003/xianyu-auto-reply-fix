@@ -229,6 +229,14 @@ docker compose up -d
 
 本项目按“现状”提供，不提供任何明示或暗示的保证；因使用本项目产生的风险、损失或责任，由使用者自行承担。
 
+## Contributors
+
+<p align="center">
+  <a href="https://github.com/GuDong2003/xianyu-auto-reply-fix/graphs/contributors">
+    <img src="https://contrib.rocks/image?repo=GuDong2003/xianyu-auto-reply-fix&amp;max=100" alt="Contributors" />
+  </a>
+</p>
+
 ## Star History
 
 <a href="https://www.star-history.com/#GuDong2003/xianyu-auto-reply-fix&Date">

@@ -18,11 +18,28 @@
 
 本项目接受赞助合作，如有意向可[联系我](mailto:contact@gudong226.com)进一步沟通。
 
+### Logo 展示示例
+
 <p align="center">
   <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
   <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
   <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
 </p>
+
+### 图文展示示例
+
+<table>
+  <tr>
+    <td width="30%" align="center">
+      <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="100%" /></a>
+    </td>
+    <td width="70%">
+      <strong>sample</strong><br />
+      sample sample sample sample sample sample sample sample sample sample sample sample sample sample sample sample<br />
+      <a href="https://example.com/">sample</a>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
   <sub>排名不分先后</sub>

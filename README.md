@@ -16,34 +16,22 @@
 
 ## 🤝 赞助合作
 
+<p align="center">
+  <a href="https://www.aiyoyoo.com/register?aff=MLPY349J4CV8"><img src="docs/images/crazytoken-banner.jpg" alt="CrazyToken" width="100%" /></a>
+</p>
+
+❤️ 感谢 [**CrazyToken**](https://www.aiyoyoo.com/register?aff=MLPY349J4CV8) 赞助支持本项目！
+
+#### CrazyToken | 接入全球主流大模型，让 AI 自动回复更省成本，低至0.05x，最高省99%
+
+CrazyToken 提供 **Claude、GPT、Gemini、Kimi、GLM、DeepSeek、Qwen、Grok 等主流模型 API**，轻松接入本项目，为商品咨询与买家问答提供 AI 回复支持。
+
+- 💰 **低至 `0.05×`**：最高省99%，Token 级账单透明可查。
+- ✨ **官方原生通道**：不掺水、不混模、不压缩长上下文，保持模型原生输出体验。
+- ⚡ **稳定高速，高并发不限流**：让多账号消息回复与连续对话更顺畅。
+- 🎁 **新用户注册赠送 `$20`**：通过[官网链接](https://www.aiyoyoo.com/register?aff=MLPY349J4CV8)注册即领体验额度，充值额外加赠；提供 **1 对 1 真人远程配置服务**，协助完成模型 API 接入。
+
 本项目接受赞助合作，如有意向可[联系我](mailto:contact@gudong226.com)进一步沟通。
-
-### Logo 展示示例
-
-<p align="center">
-  <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
-  <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
-  <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="30%" /></a>
-</p>
-
-### 图文展示示例
-
-<table>
-  <tr>
-    <td width="30%" align="center">
-      <a href="https://example.com/"><img src="docs/images/sponsor-sample.svg" alt="sample" width="100%" /></a>
-    </td>
-    <td width="70%">
-      <strong>sample</strong><br />
-      sample sample sample sample sample sample sample sample sample sample sample sample sample sample sample sample<br />
-      <a href="https://example.com/">sample</a>
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  <sub>排名不分先后</sub>
-</p>
 
 ## ✨ 核心特性
 

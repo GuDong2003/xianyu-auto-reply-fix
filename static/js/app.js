@@ -38,6 +38,7 @@ let itemsPerPage = 20; // 每页显示数量
 let totalItemsPages = 0; // 总页数
 let currentSearchKeyword = ''; // 当前搜索关键词
 let itemPublishPreviewUrls = [];
+let itemPublishImageDragIndex = null;
 let itemPublishInitialized = false;
 let itemPublishSubmitting = false;
 let itemPublishSavingMaterial = false;
@@ -11140,6 +11141,14 @@ function ensureItemPublishPageInitialized() {
         });
     }
 
+    const previewContainer = document.getElementById('publishImagePreviewList');
+    if (previewContainer) {
+        previewContainer.addEventListener('dragstart', handleItemPublishImageDragStart);
+        previewContainer.addEventListener('dragover', handleItemPublishImageDragOver);
+        previewContainer.addEventListener('drop', handleItemPublishImageDrop);
+        previewContainer.addEventListener('dragend', handleItemPublishImageDragEnd);
+    }
+
     renderItemPublishSkuEditor();
     itemPublishInitialized = true;
 }
@@ -11782,6 +11791,96 @@ function handlePublishImagesChange() {
     renderItemPublishImagePreviews(files);
 }
 
+function buildItemPublishImageOrderControls(index, count) {
+    return `
+        <div class="item-publish-preview-order">
+            <span>${index === 0 ? '首图' : `第 ${index + 1} 张`}</span>
+            <div class="item-publish-preview-order-buttons">
+                <button type="button" class="btn btn-sm btn-outline-secondary" aria-label="向前移动图片 ${index + 1}" title="向前移动" onclick="moveItemPublishImage(${index}, ${index - 1})" ${index === 0 ? 'disabled' : ''}>←</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" aria-label="向后移动图片 ${index + 1}" title="向后移动" onclick="moveItemPublishImage(${index}, ${index + 1})" ${index === count - 1 ? 'disabled' : ''}>→</button>
+            </div>
+        </div>
+    `;
+}
+
+function moveItemPublishImage(fromIndex, toIndex) {
+    if (itemPublishSubmitting || itemPublishSavingMaterial) {
+        return;
+    }
+    const input = document.getElementById('publishImages');
+    const files = Array.from(input?.files || []);
+    const images = files.length > 0 ? files : itemPublishLoadedMaterialImages;
+    if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex)
+        || fromIndex < 0 || fromIndex >= images.length
+        || toIndex < 0 || toIndex >= images.length || fromIndex === toIndex) {
+        return;
+    }
+
+    const reordered = [...images];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+    if (files.length > 0) {
+        const transfer = new DataTransfer();
+        reordered.forEach(file => transfer.items.add(file));
+        input.files = transfer.files;
+        renderItemPublishImagePreviews(reordered);
+    } else {
+        itemPublishLoadedMaterialImages = reordered;
+        renderItemPublishStoredImagePreviews(reordered);
+    }
+}
+
+function handleItemPublishImageDragStart(event) {
+    const card = event.target.closest('[data-publish-image-index]');
+    if (!card || !event.dataTransfer || event.target.closest('button')
+        || itemPublishSubmitting || itemPublishSavingMaterial) {
+        event.preventDefault();
+        return;
+    }
+    itemPublishImageDragIndex = Number(card.dataset.publishImageIndex);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(itemPublishImageDragIndex));
+    card.classList.add('is-dragging');
+}
+
+function handleItemPublishImageDragOver(event) {
+    if (itemPublishImageDragIndex === null) {
+        return;
+    }
+    event.currentTarget.querySelectorAll('.is-drop-target').forEach(card => card.classList.remove('is-drop-target'));
+    const card = event.target.closest('[data-publish-image-index]');
+    if (!card) {
+        return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move';
+    }
+    if (Number(card.dataset.publishImageIndex) !== itemPublishImageDragIndex) {
+        card.classList.add('is-drop-target');
+    }
+}
+
+function handleItemPublishImageDrop(event) {
+    if (itemPublishImageDragIndex === null) {
+        return;
+    }
+    event.preventDefault();
+    const card = event.target.closest('[data-publish-image-index]');
+    const fromIndex = itemPublishImageDragIndex;
+    handleItemPublishImageDragEnd(event);
+    if (card) {
+        moveItemPublishImage(fromIndex, Number(card.dataset.publishImageIndex));
+    }
+}
+
+function handleItemPublishImageDragEnd(event) {
+    itemPublishImageDragIndex = null;
+    event.currentTarget.querySelectorAll('.is-dragging, .is-drop-target').forEach(card => {
+        card.classList.remove('is-dragging', 'is-drop-target');
+    });
+}
+
 function renderItemPublishImagePreviews(files) {
     const previewContainer = document.getElementById('publishImagePreviewList');
     const summary = document.getElementById('publishImageSummary');
@@ -11805,22 +11904,24 @@ function renderItemPublishImagePreviews(files) {
         const objectUrl = URL.createObjectURL(file);
         itemPublishPreviewUrls.push(objectUrl);
         return `
-            <div class="item-publish-preview-card">
-                <img src="${objectUrl}" alt="预览图 ${index + 1}">
+            <div class="item-publish-preview-card" draggable="true" data-publish-image-index="${index}">
+                <img src="${objectUrl}" alt="预览图 ${index + 1}" draggable="false">
                 <div class="item-publish-preview-meta">
                     <div class="item-publish-preview-name" title="${escapeHtml(file.name || `图片 ${index + 1}`)}">${escapeHtml(file.name || `图片 ${index + 1}`)}</div>
                     <div class="item-publish-preview-size">${formatFileSize(file.size || 0)}</div>
+                    ${buildItemPublishImageOrderControls(index, files.length)}
                 </div>
             </div>
         `;
     }).join('');
 
     if (summary) {
-        summary.textContent = `已选择 ${files.length} 张图片，总大小 ${formatFileSize(totalSize)}。`;
+        summary.textContent = `已选择 ${files.length} 张图片，总大小 ${formatFileSize(totalSize)}；可拖拽或点击箭头调整顺序，第一张为首图。`;
     }
 }
 
 function clearItemPublishImagePreviews() {
+    itemPublishImageDragIndex = null;
     itemPublishPreviewUrls.forEach(url => URL.revokeObjectURL(url));
     itemPublishPreviewUrls = [];
 
@@ -12099,17 +12200,18 @@ function renderItemPublishStoredImagePreviews(images) {
         const src = getItemPublishImageSrc(image);
         const name = image?.filename || image?.name || `素材图片 ${index + 1}`;
         return `
-            <div class="item-publish-preview-card">
-                <img src="${escapeHtml(src)}" alt="${escapeHtml(name)}">
+            <div class="item-publish-preview-card" draggable="true" data-publish-image-index="${index}">
+                <img src="${escapeHtml(src)}" alt="${escapeHtml(name)}" draggable="false">
                 <div class="item-publish-preview-meta">
                     <div class="item-publish-preview-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
                     <div class="item-publish-preview-size">素材图片</div>
+                    ${buildItemPublishImageOrderControls(index, safeImages.length)}
                 </div>
             </div>
         `;
     }).join('');
     if (summary) {
-        summary.textContent = `已载入素材图片 ${safeImages.length} 张；如重新选择文件，将替换素材图片。`;
+        summary.textContent = `已载入素材图片 ${safeImages.length} 张；可拖拽或点击箭头调整顺序，第一张为首图；重新选择文件将替换素材图片。`;
     }
 }
 

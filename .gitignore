@@ -825,6 +825,7 @@ test_php_stats.py
 !tests/test_send_message_security.py
 !tests/test_structured_order_status_hotfix.py
 !tests/test_item_sync.py
+!tests/test_item_publish_form.py
 !tests/test_order_history_requests.py
 !tests/test_ai_item_context.py
 !tests/test_notification_templates.py

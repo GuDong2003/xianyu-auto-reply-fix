@@ -73,6 +73,42 @@
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
 }
 
+.item-publish-preview-card[draggable="true"] {
+  cursor: grab;
+}
+
+.item-publish-preview-card.is-dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.item-publish-preview-card.is-drop-target {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+.item-publish-preview-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: #64748b;
+}
+
+.item-publish-preview-order-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.item-publish-preview-order-buttons .btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  line-height: 1;
+}
+
 .item-publish-preview-card img {
   display: block;
   width: 100%;

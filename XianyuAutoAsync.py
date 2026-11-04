@@ -7,6 +7,7 @@ import hashlib
 import os
 import random
 import secrets
+import socket
 import threading
 from datetime import datetime
 from enum import Enum
@@ -1477,10 +1478,12 @@ class XianyuLive:
                         logger.info(f"【{self.cookie_id}】账号已禁用，停止业务流看门狗")
                         break
 
+                    self._check_sleep_gap()
+                    expected_check_at = time.monotonic() + self.stream_watchdog_check_interval
                     await self._interruptible_sleep(self.stream_watchdog_check_interval)
 
                     # 刚睡醒时当然没有业务包，别误判"假在线"再强行重连一次
-                    if self._check_sleep_gap() >= 60:
+                    if self._check_sleep_gap(expected_check_at=expected_check_at) >= 60:
                         continue
                     if time.time() - getattr(self, '_last_resume_at', 0) < 300:
                         continue
@@ -1771,18 +1774,19 @@ class XianyuLive:
             self.stream_watchdog_task = None
             logger.info(f"【{self.cookie_id}】后台任务引用已全部重置")
 
-    def _check_sleep_gap(self) -> float:
-        """返回自上次调用以来"系统睡眠"的估算秒数（wall clock 与 monotonic 的走时差）。
+    def _check_sleep_gap(self, *, expected_check_at: Optional[float] = None) -> float:
+        """估算休眠或调度中断造成的时间缺口，必要时记录恢复时间。
 
-        进程被系统挂起（macOS 合盖休眠、Windows 睡眠）时 monotonic 停走、wall clock 照走，
-        两者差值即为睡眠时长；系统维护任务触发的暗唤醒（DarkWake）也会造成 60s 以上的跳变。
+        部分平台的 monotonic 不计入休眠，可比较两种时钟的走时差；
+        Windows 的 monotonic 包含休眠，需同时检查看门狗是否错过原定检查时间。
+        调用方传入的单调钟期限独立于共享采样，避免重连采样覆盖休眠信息。
         """
         now_wall, now_mono = time.time(), time.monotonic()
         last = getattr(self, '_sleep_tick', None)
         self._sleep_tick = (now_wall, now_mono)
-        if not last:
-            return 0.0
-        gap = (now_wall - last[0]) - (now_mono - last[1])
+        gap = (now_wall - last[0]) - (now_mono - last[1]) if last else 0.0
+        if expected_check_at is not None:
+            gap = max(gap, now_mono - expected_check_at)
         if gap >= 60:
             self._last_resume_at = now_wall
         return max(0.0, gap)
@@ -1795,7 +1799,26 @@ class XianyuLive:
         self._last_dns_warn_at = now
         return False
 
-    def _calculate_retry_delay(self, error_msg: str) -> int:
+    def _is_dns_error(self, error: Any) -> bool:
+        """统一识别 DNS 异常，兼容 Windows、本地化消息和包装异常。"""
+        current = error
+        visited = set()
+        while isinstance(current, BaseException) and id(current) not in visited:
+            if isinstance(current, socket.gaierror):
+                return True
+            visited.add(id(current))
+            current = current.__cause__ or current.__context__
+
+        message = self._safe_str(error).lower()
+        return any(marker in message for marker in (
+            'nodename nor servname',
+            'name or service not known',
+            'temporary failure in name resolution',
+            'getaddrinfo failed',
+            'gaierror',
+        ))
+
+    def _calculate_retry_delay(self, error_msg: Any) -> int:
         """根据错误类型和失败次数计算重试延迟"""
         current_time = time.time()
         if self._is_account_pause_status(getattr(self, 'last_token_refresh_status', None)):
@@ -1808,12 +1831,10 @@ class XianyuLive:
             return max(60, self._compute_token_retry_wait_seconds(current_time))
 
         # DNS/本地网络未就绪（系统唤醒瞬间最常见）→ 快速重试，不按失败次数退避
-        if ("nodename nor servname" in error_msg
-                or "Name or service not known" in error_msg
-                or "Temporary failure in name resolution" in error_msg
-                or "gaierror" in error_msg):
+        if self._is_dns_error(error_msg):
             return 3
 
+        error_msg = self._safe_str(error_msg)
         # WebSocket意外断开 - 短延迟
         if "no close frame received or sent" in error_msg:
             return min(3 * self.connection_failures, 15)
@@ -17683,10 +17704,7 @@ class XianyuLive:
                     )
                     
                     # DNS/本地网络未就绪：系统唤醒瞬间、刚断网时最常见，不是账号或凭证问题
-                    is_dns_error = ("nodename nor servname" in error_msg
-                                    or "Name or service not known" in error_msg
-                                    or "Temporary failure in name resolution" in error_msg
-                                    or "gaierror" in error_type.lower())
+                    is_dns_error = self._is_dns_error(e)
 
                     if is_connection_closed:
                         logger.warning(f"【{self.cookie_id}】WebSocket连接已关闭 ({self.connection_failures + 1}/{self.max_connection_failures})")
@@ -17785,13 +17803,14 @@ class XianyuLive:
                     slept = self._check_sleep_gap()
                     if slept >= 60:
                         logger.info(f"【{self.cookie_id}】检测到系统休眠 {slept:.0f} 秒，放宽重连节奏")
-                    retry_delay = self._calculate_retry_delay(error_msg)
+                    retry_delay = self._calculate_retry_delay(e)
                     if is_dns_error and (time.time() - getattr(self, '_last_resume_at', 0)) < 900:
                         # 睡眠唤醒后的暗唤醒窗口只有几秒，反复重连既连不上又刷日志，
                         # 直接拉长到 2 分钟；真恢复后会由下一次重试立刻接上。
                         retry_delay = 120
                     logger.warning(f"【{self.cookie_id}】将在 {retry_delay} 秒后重试连接...")
 
+                    expected_retry_at = time.monotonic() + retry_delay
                     try:
                         # 清空当前token，确保重新连接时会重新获取
                         if self.current_token:
@@ -17882,6 +17901,9 @@ class XianyuLive:
                         
                         logger.info(f"【{self.cookie_id}】清理失败后等待完成（总耗时 {time.time() - start_time:.1f} 秒）")
                     
+                    # 未建连时看门狗尚未运行，重试等待本身也要识别 Windows 休眠。
+                    self._check_sleep_gap(expected_check_at=expected_retry_at)
+
                     # 继续下一次循环
                     logger.info(f"【{self.cookie_id}】开始新一轮WebSocket连接尝试...")
                     continue

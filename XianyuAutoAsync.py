@@ -1479,6 +1479,12 @@ class XianyuLive:
 
                     await self._interruptible_sleep(self.stream_watchdog_check_interval)
 
+                    # 刚睡醒时当然没有业务包，别误判"假在线"再强行重连一次
+                    if self._check_sleep_gap() >= 60:
+                        continue
+                    if time.time() - getattr(self, '_last_resume_at', 0) < 300:
+                        continue
+
                     ws = self.ws
                     if not ws or getattr(ws, "closed", False):
                         continue
@@ -1765,6 +1771,30 @@ class XianyuLive:
             self.stream_watchdog_task = None
             logger.info(f"【{self.cookie_id}】后台任务引用已全部重置")
 
+    def _check_sleep_gap(self) -> float:
+        """返回自上次调用以来"系统睡眠"的估算秒数（wall clock 与 monotonic 的走时差）。
+
+        进程被系统挂起（macOS 合盖休眠、Windows 睡眠）时 monotonic 停走、wall clock 照走，
+        两者差值即为睡眠时长；系统维护任务触发的暗唤醒（DarkWake）也会造成 60s 以上的跳变。
+        """
+        now_wall, now_mono = time.time(), time.monotonic()
+        last = getattr(self, '_sleep_tick', None)
+        self._sleep_tick = (now_wall, now_mono)
+        if not last:
+            return 0.0
+        gap = (now_wall - last[0]) - (now_mono - last[1])
+        if gap >= 60:
+            self._last_resume_at = now_wall
+        return max(0.0, gap)
+
+    def _dns_warn_dedup(self, window: int = 600) -> bool:
+        """DNS/网络类告警去重：窗口期内重复出现则返回 True（调用方应吞掉日志）。"""
+        now = time.time()
+        if now - getattr(self, '_last_dns_warn_at', 0) < window:
+            return True
+        self._last_dns_warn_at = now
+        return False
+
     def _calculate_retry_delay(self, error_msg: str) -> int:
         """根据错误类型和失败次数计算重试延迟"""
         current_time = time.time()
@@ -1776,6 +1806,13 @@ class XianyuLive:
 
         if getattr(self, 'last_token_refresh_status', None) in {"password_login_backoff_wait", "verification_pending_manual", "qr_login_grace_wait"}:
             return max(60, self._compute_token_retry_wait_seconds(current_time))
+
+        # DNS/本地网络未就绪（系统唤醒瞬间最常见）→ 快速重试，不按失败次数退避
+        if ("nodename nor servname" in error_msg
+                or "Name or service not known" in error_msg
+                or "Temporary failure in name resolution" in error_msg
+                or "gaierror" in error_msg):
+            return 3
 
         # WebSocket意外断开 - 短延迟
         if "no close frame received or sent" in error_msg:
@@ -15399,7 +15436,11 @@ class XianyuLive:
         try:
             # 尝试使用extra_headers参数
             connect_kwargs = {
-                'extra_headers': headers
+                'extra_headers': headers,
+                # 默认 20/20：一次 20 秒的系统卡顿或休眠就会收到 1011 keepalive timeout，
+                # 实际连接没坏却被迫重连。放宽到 30/60 更贴合桌面端使用场景。
+                'ping_interval': 30,
+                'ping_timeout': 60,
             }
             if proxy_sock:
                 connect_kwargs['sock'] = proxy_sock
@@ -15418,7 +15459,9 @@ class XianyuLive:
                 # 使用additional_headers参数（较新版本）
                 try:
                     connect_kwargs = {
-                        'additional_headers': headers
+                        'additional_headers': headers,
+                        'ping_interval': 30,
+                        'ping_timeout': 60,
                     }
                     if proxy_sock:
                         connect_kwargs['sock'] = proxy_sock
@@ -17639,18 +17682,30 @@ class XianyuLive:
                         'IncompleteReadError' in error_type
                     )
                     
-                    # 对于连接关闭错误，使用警告级别而不是错误级别
+                    # DNS/本地网络未就绪：系统唤醒瞬间、刚断网时最常见，不是账号或凭证问题
+                    is_dns_error = ("nodename nor servname" in error_msg
+                                    or "Name or service not known" in error_msg
+                                    or "Temporary failure in name resolution" in error_msg
+                                    or "gaierror" in error_type.lower())
+
                     if is_connection_closed:
                         logger.warning(f"【{self.cookie_id}】WebSocket连接已关闭 ({self.connection_failures + 1}/{self.max_connection_failures})")
                         logger.warning(f"【{self.cookie_id}】关闭原因: {error_msg}")
+                    elif is_dns_error:
+                        # 不计入失败次数：否则连续 5 次会被当成凭证问题，
+                        # 触发"密码登录刷新 + 重启实例"，而真正的原因只是网络还没起来。
+                        if not self._dns_warn_dedup():
+                            logger.warning(f"【{self.cookie_id}】网络未就绪（DNS 解析失败），恢复后自动重连")
                     else:
                         self.connection_failures += 1
-                    # 更新连接状态为重连中
+
                     self._set_connection_state(ConnectionState.RECONNECTING, f"第{self.connection_failures}次失败")
-                    logger.error(f"【{self.cookie_id}】WebSocket连接异常 ({self.connection_failures}/{self.max_connection_failures})")
-                    logger.error(f"【{self.cookie_id}】异常类型: {error_type}")
-                    logger.error(f"【{self.cookie_id}】异常信息: {error_msg}")
-                    logger.warning(f"【{self.cookie_id}】异常堆栈:\n{traceback.format_exc()}")
+                    if not is_dns_error:
+                        logger.error(f"【{self.cookie_id}】WebSocket连接异常 ({self.connection_failures}/{self.max_connection_failures})")
+                        logger.error(f"【{self.cookie_id}】异常类型: {error_type}")
+                        logger.error(f"【{self.cookie_id}】异常信息: {error_msg}")
+                        if not is_connection_closed:
+                            logger.warning(f"【{self.cookie_id}】异常堆栈:\n{traceback.format_exc()}")
                     
                     # 确保清理 WebSocket 引用
                     if self.ws:
@@ -17727,7 +17782,14 @@ class XianyuLive:
                         return  # 退出当前连接循环，等待被取消
 
                     # 计算重试延迟
+                    slept = self._check_sleep_gap()
+                    if slept >= 60:
+                        logger.info(f"【{self.cookie_id}】检测到系统休眠 {slept:.0f} 秒，放宽重连节奏")
                     retry_delay = self._calculate_retry_delay(error_msg)
+                    if is_dns_error and (time.time() - getattr(self, '_last_resume_at', 0)) < 900:
+                        # 睡眠唤醒后的暗唤醒窗口只有几秒，反复重连既连不上又刷日志，
+                        # 直接拉长到 2 分钟；真恢复后会由下一次重试立刻接上。
+                        retry_delay = 120
                     logger.warning(f"【{self.cookie_id}】将在 {retry_delay} 秒后重试连接...")
 
                     try:

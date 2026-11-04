@@ -286,6 +286,24 @@ class ReconnectLoopTest(unittest.IsolatedAsyncioTestCase):
         live._force_websocket_reconnect.assert_not_awaited()
         live._maybe_notify_message_stream_stale.assert_not_awaited()
 
+    async def test_resume_dns_backoff_preserves_credential_wait(self):
+        live = _make_reconnect_live([
+            socket.gaierror(11001, 'getaddrinfo failed'),
+        ])
+        live.last_token_refresh_status = 'password_login_backoff_wait'
+        live._last_resume_at = 1000.0
+        live._compute_token_retry_wait_seconds = mock.Mock(return_value=900)
+        with mock.patch('cookie_manager.manager', None), \
+                mock.patch('XianyuAutoAsync.time.time', return_value=1000.0), \
+                mock.patch('XianyuAutoAsync.time.monotonic', return_value=500.0), \
+                mock.patch('XianyuAutoAsync.asyncio.sleep', new_callable=mock.AsyncMock) as sleep:
+            with self.assertRaises(asyncio.CancelledError):
+                await live.main()
+
+        self.assertEqual(sum(call.args[0] for call in sleep.await_args_list), 900)
+        live._try_password_login_refresh.assert_not_awaited()
+        live._restart_instance.assert_not_awaited()
+
 
 if __name__ == '__main__':
     unittest.main()

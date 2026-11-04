@@ -17807,7 +17807,7 @@ class XianyuLive:
                     if is_dns_error and (time.time() - getattr(self, '_last_resume_at', 0)) < 900:
                         # 睡眠唤醒后的暗唤醒窗口只有几秒，反复重连既连不上又刷日志，
                         # 直接拉长到 2 分钟；真恢复后会由下一次重试立刻接上。
-                        retry_delay = 120
+                        retry_delay = max(retry_delay, 120)
                     logger.warning(f"【{self.cookie_id}】将在 {retry_delay} 秒后重试连接...")
 
                     expected_retry_at = time.monotonic() + retry_delay

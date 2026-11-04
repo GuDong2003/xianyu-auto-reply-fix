@@ -7,6 +7,7 @@ import hashlib
 import os
 import random
 import secrets
+import socket
 import threading
 from datetime import datetime
 from enum import Enum
@@ -1477,7 +1478,15 @@ class XianyuLive:
                         logger.info(f"【{self.cookie_id}】账号已禁用，停止业务流看门狗")
                         break
 
+                    self._check_sleep_gap()
+                    expected_check_at = time.monotonic() + self.stream_watchdog_check_interval
                     await self._interruptible_sleep(self.stream_watchdog_check_interval)
+
+                    # 刚睡醒时当然没有业务包，别误判"假在线"再强行重连一次
+                    if self._check_sleep_gap(expected_check_at=expected_check_at) >= 60:
+                        continue
+                    if time.time() - getattr(self, '_last_resume_at', 0) < 300:
+                        continue
 
                     ws = self.ws
                     if not ws or getattr(ws, "closed", False):
@@ -1765,7 +1774,51 @@ class XianyuLive:
             self.stream_watchdog_task = None
             logger.info(f"【{self.cookie_id}】后台任务引用已全部重置")
 
-    def _calculate_retry_delay(self, error_msg: str) -> int:
+    def _check_sleep_gap(self, *, expected_check_at: Optional[float] = None) -> float:
+        """估算休眠或调度中断造成的时间缺口，必要时记录恢复时间。
+
+        部分平台的 monotonic 不计入休眠，可比较两种时钟的走时差；
+        Windows 的 monotonic 包含休眠，需同时检查看门狗是否错过原定检查时间。
+        调用方传入的单调钟期限独立于共享采样，避免重连采样覆盖休眠信息。
+        """
+        now_wall, now_mono = time.time(), time.monotonic()
+        last = getattr(self, '_sleep_tick', None)
+        self._sleep_tick = (now_wall, now_mono)
+        gap = (now_wall - last[0]) - (now_mono - last[1]) if last else 0.0
+        if expected_check_at is not None:
+            gap = max(gap, now_mono - expected_check_at)
+        if gap >= 60:
+            self._last_resume_at = now_wall
+        return max(0.0, gap)
+
+    def _dns_warn_dedup(self, window: int = 600) -> bool:
+        """DNS/网络类告警去重：窗口期内重复出现则返回 True（调用方应吞掉日志）。"""
+        now = time.time()
+        if now - getattr(self, '_last_dns_warn_at', 0) < window:
+            return True
+        self._last_dns_warn_at = now
+        return False
+
+    def _is_dns_error(self, error: Any) -> bool:
+        """统一识别 DNS 异常，兼容 Windows、本地化消息和包装异常。"""
+        current = error
+        visited = set()
+        while isinstance(current, BaseException) and id(current) not in visited:
+            if isinstance(current, socket.gaierror):
+                return True
+            visited.add(id(current))
+            current = current.__cause__ or current.__context__
+
+        message = self._safe_str(error).lower()
+        return any(marker in message for marker in (
+            'nodename nor servname',
+            'name or service not known',
+            'temporary failure in name resolution',
+            'getaddrinfo failed',
+            'gaierror',
+        ))
+
+    def _calculate_retry_delay(self, error_msg: Any) -> int:
         """根据错误类型和失败次数计算重试延迟"""
         current_time = time.time()
         if self._is_account_pause_status(getattr(self, 'last_token_refresh_status', None)):
@@ -1777,6 +1830,11 @@ class XianyuLive:
         if getattr(self, 'last_token_refresh_status', None) in {"password_login_backoff_wait", "verification_pending_manual", "qr_login_grace_wait"}:
             return max(60, self._compute_token_retry_wait_seconds(current_time))
 
+        # DNS/本地网络未就绪（系统唤醒瞬间最常见）→ 快速重试，不按失败次数退避
+        if self._is_dns_error(error_msg):
+            return 3
+
+        error_msg = self._safe_str(error_msg)
         # WebSocket意外断开 - 短延迟
         if "no close frame received or sent" in error_msg:
             return min(3 * self.connection_failures, 15)
@@ -15399,7 +15457,11 @@ class XianyuLive:
         try:
             # 尝试使用extra_headers参数
             connect_kwargs = {
-                'extra_headers': headers
+                'extra_headers': headers,
+                # 默认 20/20：一次 20 秒的系统卡顿或休眠就会收到 1011 keepalive timeout，
+                # 实际连接没坏却被迫重连。放宽到 30/60 更贴合桌面端使用场景。
+                'ping_interval': 30,
+                'ping_timeout': 60,
             }
             if proxy_sock:
                 connect_kwargs['sock'] = proxy_sock
@@ -15418,7 +15480,9 @@ class XianyuLive:
                 # 使用additional_headers参数（较新版本）
                 try:
                     connect_kwargs = {
-                        'additional_headers': headers
+                        'additional_headers': headers,
+                        'ping_interval': 30,
+                        'ping_timeout': 60,
                     }
                     if proxy_sock:
                         connect_kwargs['sock'] = proxy_sock
@@ -17639,18 +17703,27 @@ class XianyuLive:
                         'IncompleteReadError' in error_type
                     )
                     
-                    # 对于连接关闭错误，使用警告级别而不是错误级别
+                    # DNS/本地网络未就绪：系统唤醒瞬间、刚断网时最常见，不是账号或凭证问题
+                    is_dns_error = self._is_dns_error(e)
+
                     if is_connection_closed:
                         logger.warning(f"【{self.cookie_id}】WebSocket连接已关闭 ({self.connection_failures + 1}/{self.max_connection_failures})")
                         logger.warning(f"【{self.cookie_id}】关闭原因: {error_msg}")
+                    elif is_dns_error:
+                        # 不计入失败次数：否则连续 5 次会被当成凭证问题，
+                        # 触发"密码登录刷新 + 重启实例"，而真正的原因只是网络还没起来。
+                        if not self._dns_warn_dedup():
+                            logger.warning(f"【{self.cookie_id}】网络未就绪（DNS 解析失败），恢复后自动重连")
                     else:
                         self.connection_failures += 1
-                    # 更新连接状态为重连中
+
                     self._set_connection_state(ConnectionState.RECONNECTING, f"第{self.connection_failures}次失败")
-                    logger.error(f"【{self.cookie_id}】WebSocket连接异常 ({self.connection_failures}/{self.max_connection_failures})")
-                    logger.error(f"【{self.cookie_id}】异常类型: {error_type}")
-                    logger.error(f"【{self.cookie_id}】异常信息: {error_msg}")
-                    logger.warning(f"【{self.cookie_id}】异常堆栈:\n{traceback.format_exc()}")
+                    if not is_dns_error:
+                        logger.error(f"【{self.cookie_id}】WebSocket连接异常 ({self.connection_failures}/{self.max_connection_failures})")
+                        logger.error(f"【{self.cookie_id}】异常类型: {error_type}")
+                        logger.error(f"【{self.cookie_id}】异常信息: {error_msg}")
+                        if not is_connection_closed:
+                            logger.warning(f"【{self.cookie_id}】异常堆栈:\n{traceback.format_exc()}")
                     
                     # 确保清理 WebSocket 引用
                     if self.ws:
@@ -17727,9 +17800,17 @@ class XianyuLive:
                         return  # 退出当前连接循环，等待被取消
 
                     # 计算重试延迟
-                    retry_delay = self._calculate_retry_delay(error_msg)
+                    slept = self._check_sleep_gap()
+                    if slept >= 60:
+                        logger.info(f"【{self.cookie_id}】检测到系统休眠 {slept:.0f} 秒，放宽重连节奏")
+                    retry_delay = self._calculate_retry_delay(e)
+                    if is_dns_error and (time.time() - getattr(self, '_last_resume_at', 0)) < 900:
+                        # 睡眠唤醒后的暗唤醒窗口只有几秒，反复重连既连不上又刷日志，
+                        # 直接拉长到 2 分钟；真恢复后会由下一次重试立刻接上。
+                        retry_delay = max(retry_delay, 120)
                     logger.warning(f"【{self.cookie_id}】将在 {retry_delay} 秒后重试连接...")
 
+                    expected_retry_at = time.monotonic() + retry_delay
                     try:
                         # 清空当前token，确保重新连接时会重新获取
                         if self.current_token:
@@ -17820,6 +17901,9 @@ class XianyuLive:
                         
                         logger.info(f"【{self.cookie_id}】清理失败后等待完成（总耗时 {time.time() - start_time:.1f} 秒）")
                     
+                    # 未建连时看门狗尚未运行，重试等待本身也要识别 Windows 休眠。
+                    self._check_sleep_gap(expected_check_at=expected_retry_at)
+
                     # 继续下一次循环
                     logger.info(f"【{self.cookie_id}】开始新一轮WebSocket连接尝试...")
                     continue

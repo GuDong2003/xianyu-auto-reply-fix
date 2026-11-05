@@ -7719,6 +7719,10 @@ Cookie数量: {cookie_count}
             try:
                 cursor = self.conn.cursor()
                 cursor.execute('''
+                -- 时间窗只认「平台完成时间 / 记录创建时间」，不能带 updated_at：
+                -- 它是记录最后修改时间，订单同步或状态更新都会刷新（update_order_* 里
+                -- 就会写 updated_at = CURRENT_TIMESTAMP）。带上它会让几个月前完成的老订单
+                -- 一直留在窗口内，days 参数形同虚设。
                 SELECT o.order_id, o.item_id, o.buyer_id, o.buyer_nick, o.sid,
                        o.order_status, o.cookie_id, o.platform_completed_at, o.created_at, o.updated_at,
                        o.is_rated, o.rated_at, o.rate_error
@@ -7726,14 +7730,14 @@ Cookie数量: {cookie_count}
                 WHERE o.cookie_id = ?
                   AND o.order_status = 'completed'
                   AND COALESCE(o.is_rated, 0) = 0
-                  AND datetime(COALESCE(o.platform_completed_at, o.updated_at, o.created_at)) >= datetime('now', ?)
+                  AND datetime(COALESCE(o.platform_completed_at, o.created_at)) >= datetime('now', ?)
                   AND NOT EXISTS (
                       SELECT 1 FROM scheduled_rate_logs l
                       WHERE l.order_id = o.order_id
                         AND l.status IN ('failed', 'cookie_expired')
                         AND datetime(l.created_at) >= datetime('now', ?)
                   )
-                ORDER BY datetime(COALESCE(o.platform_completed_at, o.updated_at, o.created_at)) DESC
+                ORDER BY datetime(COALESCE(o.platform_completed_at, o.created_at)) DESC
                 LIMIT ?
                 ''', (cookie_id, f'-{max(1, int(days or 10))} days', f'-{max(1, int(cooldown_minutes or 30))} minutes', max(1, min(int(limit or 5), 50))))
                 orders = []

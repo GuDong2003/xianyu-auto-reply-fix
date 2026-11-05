@@ -2181,6 +2181,12 @@ class XianyuLive:
         
         # 工作协程管理
         self.message_workers = []  # 工作协程列表
+        # 队列统计监控协程的引用。必须显式持有并在 stop 时取消：
+        # 它是 while self.message_queue_running 驱动的常驻协程，而每次 WebSocket 重连都会
+        # 走一遍 stop（running=False）→ start（running=True）。旧协程在 sleep(60) 里错过这个
+        # 短暂的 False 窗口，醒来时看到 True 就继续跑，于是每重连一次就多泄漏一个监控协程。
+        # 实测单日「消息队列统计」日志量约为理论值的 20 倍，协程本身也一直留在内存里。
+        self._queue_stats_task = None
         self.message_queue_running = False  # 队列系统运行状态
         
         # 队列监控统计
@@ -3218,8 +3224,12 @@ class XianyuLive:
             worker_task = self._create_tracked_task(self._message_worker(i))
             self.message_workers.append(worker_task)
         
-        # 启动队列监控任务
-        self._create_tracked_task(self._queue_stats_monitor())
+        # 启动队列监控任务：先把可能残留的旧监控协程收掉，
+        # 避免 WebSocket 重连时 stop/start 紧邻、旧协程错过 running=False 的窗口。
+        old_monitor = getattr(self, '_queue_stats_task', None)
+        if old_monitor is not None and not old_monitor.done():
+            old_monitor.cancel()
+        self._queue_stats_task = self._create_tracked_task(self._queue_stats_monitor())
         
         logger.info(f"【{self.cookie_id}】🚀 消息队列系统已启动，{self.message_queue_workers}个工作协程")
     
@@ -3232,11 +3242,20 @@ class XianyuLive:
             if not worker_task.done():
                 worker_task.cancel()
         
-        # 等待所有工作协程结束
-        if self.message_workers:
-            await asyncio.gather(*self.message_workers, return_exceptions=True)
+        # 取消队列统计监控协程。它是常驻循环，不显式取消就会随每次重连累积（详见 __init__ 说明）
+        monitor_task = getattr(self, '_queue_stats_task', None)
+        if monitor_task is not None and not monitor_task.done():
+            monitor_task.cancel()
+
+        # 等待所有协程结束（含监控），避免取消请求悬空
+        wait_targets = list(self.message_workers)
+        if monitor_task is not None:
+            wait_targets.append(monitor_task)
+        if wait_targets:
+            await asyncio.gather(*wait_targets, return_exceptions=True)
         
         self.message_workers = []
+        self._queue_stats_task = None
         logger.info(f"【{self.cookie_id}】🛑 消息队列系统已停止")
     
     async def _queue_stats_monitor(self):

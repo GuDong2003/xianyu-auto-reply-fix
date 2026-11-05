@@ -3246,7 +3246,7 @@ class XianyuLive:
         monitor_task = getattr(self, '_queue_stats_task', None)
         if monitor_task is not None and not monitor_task.done():
             monitor_task.cancel()
-        
+
         # 等待所有协程结束（含监控），避免取消请求悬空
         wait_targets = list(self.message_workers)
         if monitor_task is not None:

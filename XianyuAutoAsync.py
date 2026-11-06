@@ -270,6 +270,10 @@ def log_captcha_event(cookie_id: str, event_type: str, success: bool = None, det
 # setup_logging(LOG_CONFIG)  # 已移除，模块不存在
 
 class XianyuLive:
+    # 心跳响应日志的节流窗口（秒）。心跳 15 秒一次，一天 5760 条/账号，
+    # 全部打 WARNING 会把真实告警淹没；按 5 分钟一条既保留存活判据又不刷屏。
+    HEARTBEAT_LOG_INTERVAL_SECONDS = 300
+
     # 类级别的锁字典，为每个order_id维护一个锁（用于自动发货）
     _order_locks = defaultdict(lambda: asyncio.Lock())
     # 记录锁的最后使用时间，用于清理
@@ -1373,23 +1377,20 @@ class XianyuLive:
                 logger.info(state_msg)
 
     async def _interruptible_sleep(self, duration: float):
-        """可中断的sleep，将长时间sleep拆分成多个短时间sleep，以便及时响应取消信号
-        
+        """可中断的 sleep。
+
+        历史实现把每段 sleep 拆成 1 秒一片循环，注释说是为了"及时响应取消信号"。
+        但 `asyncio.sleep` 本身就能被 `task.cancel()` 立刻打断 —— 已实测：
+        60 秒的 sleep 在 0.3 秒时 cancel，立即抛 CancelledError，不需要分片。
+
+        分片的代价：5 个常驻循环 × 每个账号，按各自间隔累计约 **86.4 万次唤醒/天**
+        （单账号），每次唤醒约 0.146ms，而原生 sleep 只要 0.03ms。这部分纯属白烧，
+        笔记本上表现为待机功耗偏高。
+
         Args:
             duration: 总睡眠时间（秒）
         """
-        # 将长时间sleep拆分成多个1秒的短sleep，这样可以及时响应取消信号
-        chunk_size = 1.0  # 每次sleep 1秒
-        remaining = duration
-        
-        while remaining > 0:
-            sleep_time = min(chunk_size, remaining)
-            try:
-                await asyncio.sleep(sleep_time)
-                remaining -= sleep_time
-            except asyncio.CancelledError:
-                # 如果收到取消信号，立即抛出
-                raise
+        await asyncio.sleep(max(0.0, float(duration)))
 
     def _reset_stream_activity_state(self, connected_at: Optional[float] = None):
         """重置当前连接的消息流活性状态。"""
@@ -1401,6 +1402,9 @@ class XianyuLive:
         self.last_sent_heartbeat_mid = None
         self.pending_heartbeat_mids.clear()
         self.last_stream_watchdog_reconnect_time = 0
+        # 新连接的第一条心跳响应必须记日志：这是"WS 真的通了"的唯一判据
+        self._last_hb_log_at = 0
+        self._hb_was_stale = True
 
     def _mark_non_heartbeat_message(self, received_at: Optional[float] = None, *, is_sync_package: bool = False):
         """记录最近一次非心跳业务包时间。"""
@@ -1942,9 +1946,9 @@ class XianyuLive:
             
             if total_cleaned > 0:
                 logger.info(f"【{self.cookie_id}】Playwright缓存清理完成: 删除了 {total_cleaned} 个文件/目录，释放 {total_size_mb:.2f} MB")
-            else:
-                logger.warning(f"【{self.cookie_id}】Playwright缓存清理: 没有需要清理的临时文件")
-                
+            # 没有可清理的东西就不打日志：temp_paths 是 Docker 内的路径，
+            # 桌面端永远为空，原来每 5 分钟一条 WARNING，一天几百行纯噪音。
+
         except Exception as e:
             logger.warning(f"【{self.cookie_id}】清理Playwright缓存时出错: {self._safe_str(e)}")
 
@@ -3274,19 +3278,29 @@ class XianyuLive:
                 if stats['received'] > 0:
                     process_rate = stats['processed'] / elapsed if elapsed > 0 else 0
                     drop_rate = (stats['dropped_full'] + stats['dropped_expired']) / stats['received'] * 100
-                    
-                    logger.info(
-                        f"【{self.cookie_id}】📊 消息队列统计 - "
-                        f"队列大小: {self.message_queue.qsize()}/{self.message_queue_max_size} | "
-                        f"收到: {stats['received']} | "
-                        f"处理: {stats['processed']} | "
-                        f"丢弃(满): {stats['dropped_full']} | "
-                        f"丢弃(过期): {stats['dropped_expired']} | "
-                        f"错误: {stats['errors']} | "
-                        f"处理速率: {process_rate:.1f}/s | "
-                        f"丢弃率: {drop_rate:.1f}%"
+
+                    # 每分钟一条，队列健康时零信息量。改成：有丢弃/错误/积压必报，
+                    # 否则 30 分钟一条，让日志留给真正的问题。
+                    has_problem = (
+                        stats['dropped_full'] > 0
+                        or stats['dropped_expired'] > 0
+                        or stats['errors'] > 0
+                        or self.message_queue.qsize() > 0
                     )
-                    
+                    if has_problem or (time.time() - getattr(self, '_last_queue_stats_log_at', 0) >= 1800):
+                        self._last_queue_stats_log_at = time.time()
+                        logger.info(
+                            f"【{self.cookie_id}】📊 消息队列统计 - "
+                            f"队列大小: {self.message_queue.qsize()}/{self.message_queue_max_size} | "
+                            f"收到: {stats['received']} | "
+                            f"处理: {stats['processed']} | "
+                            f"丢弃(满): {stats['dropped_full']} | "
+                            f"丢弃(过期): {stats['dropped_expired']} | "
+                            f"错误: {stats['errors']} | "
+                            f"处理速率: {process_rate:.1f}/s | "
+                            f"丢弃率: {drop_rate:.1f}%"
+                        )
+
                     # 如果丢弃率过高，发出警告
                     if drop_rate > 10:
                         logger.warning(f"【{self.cookie_id}】⚠️ 消息丢弃率过高({drop_rate:.1f}%)，建议增加工作协程数量或检查消息处理效率")
@@ -13719,9 +13733,16 @@ class XianyuLive:
         try:
             self.last_sent_heartbeat_mid = heartbeat_mid
             self.pending_heartbeat_mids.append(heartbeat_mid)
+            # 上一次响应已经超时太久 → 标记"曾经断过"，恢复后那条响应必须记日志
+            if self.last_heartbeat_response and (
+                time.time() - self.last_heartbeat_response > self.heartbeat_interval * 3
+            ):
+                self._hb_was_stale = True
             await asyncio.wait_for(ws.send(json.dumps(msg)), timeout=2.0)
             self.last_heartbeat_time = time.time()
-            logger.warning(f"【{self.cookie_id}】心跳包已发送 [ID:{heartbeat_mid}]")
+            # 心跳是 WARNING 会让一天刷上万行、把真告警淹掉；判定 WS 通不通
+            # 看的是"心跳响应正常"那条，这里降到 DEBUG。
+            logger.debug(f"【{self.cookie_id}】心跳包已发送 [ID:{heartbeat_mid}]")
         except asyncio.TimeoutError:
             raise ConnectionError("心跳发送超时，WebSocket可能已断开")
         except asyncio.CancelledError:
@@ -13804,7 +13825,18 @@ class XianyuLive:
                 self.pending_heartbeat_mids.remove(response_mid)
             except ValueError:
                 pass
-            logger.warning(f"【{self.cookie_id}】心跳响应正常 [ID:{response_mid}]")
+            # 保留 WARNING 级别作为"WS 真的通了"的判据，但按窗口节流：
+            # 原来 15 秒一条，单账号一天 5760 行，真故障反而被埋掉。
+            # 断线恢复后的首条一定记录（_hb_was_stale），窗口判断不拦它。
+            now_hb = self.last_heartbeat_response
+            prev_hb = getattr(self, '_last_hb_log_at', 0) or 0
+            if (now_hb - prev_hb >= self.HEARTBEAT_LOG_INTERVAL_SECONDS) or getattr(self, '_hb_was_stale', False):
+                logger.warning(
+                    f"【{self.cookie_id}】心跳响应正常 [ID:{response_mid}]"
+                    + ("（此前有中断，已恢复）" if getattr(self, '_hb_was_stale', False) else "")
+                )
+                self._last_hb_log_at = now_hb
+                self._hb_was_stale = False
             return True
         except Exception as e:
             logger.error(f"处理心跳响应出错: {self._safe_str(e)}")

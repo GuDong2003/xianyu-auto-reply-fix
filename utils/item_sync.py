@@ -57,6 +57,10 @@ async def sync_all_item_pages(
             for attempts, current_page_size in enumerate(page_sizes, 1):
                 # 商品顺序可能在两次请求间变化，不合并不同轮次的快照。
                 items, seen_ids, pages, saved = [], set(), 0, 0
+                # 记录本轮每页实际条数，用于区分「漏页」和「平台总数口径不同」：
+                # [20, 20, 3] 且已结束 = 末页不满，属正常收尾，对不上多半是口径问题；
+                # [20, 3, 20] = 中间页不满却不是最后一页，那是真漏页。
+                page_sizes_seen = []
                 expected_total = None
                 started_ns = time.time_ns()
                 while True:
@@ -83,6 +87,7 @@ async def sync_all_item_pages(
                     items.extend(current)
                     seen_ids.update(current_ids)
                     saved += response.get('saved_count', 0)
+                    page_sizes_seen.append(len(current))
 
                     page_total = response.get('total_count')
                     if page_total is not None:
@@ -100,7 +105,10 @@ async def sync_all_item_pages(
                         retry_reason = '商品分页为空但仍提示下一页，无法确认完整列表'
                         break
                     if expected_total is not None and len(items) > expected_total:
-                        retry_reason = '商品数量与平台返回总数不一致'
+                        retry_reason = (
+                            f'商品数量与平台返回总数不一致（已抓取 {len(items)} 条，'
+                            f'平台返回 {expected_total} 条，共 {pages} 页）'
+                        )
                         break
 
                     complete = has_next is False or (has_next is None and len(current) < current_page_size)
@@ -108,7 +116,11 @@ async def sync_all_item_pages(
                         if expected_total is not None and len(items) != expected_total:
                             # 短页或结束标记可能提前出现；有进展时继续探测下一页。
                             if not current:
-                                retry_reason = '商品数量与平台返回总数不一致'
+                                retry_reason = (
+                                    f'商品数量与平台返回总数不一致（已抓取 {len(items)} 条，'
+                                    f'平台返回 {expected_total} 条，共 {pages} 页，'
+                                    f'各页条数 {page_sizes_seen}）'
+                                )
                                 break
                         else:
                             unlisted = (
@@ -121,7 +133,8 @@ async def sync_all_item_pages(
                 if attempts == len(page_sizes):
                     return result(False, f'商品列表自动获取 {attempts} 轮后仍未通过完整性校验：{retry_reason}，未更新下架状态')
                 logger.warning(
-                    f'商品列表第 {attempts} 轮校验失败：{retry_reason}；稍后从第一页重新获取'
+                    f'商品列表第 {attempts} 轮校验失败：{retry_reason}；'
+                    f'本轮各页条数 {page_sizes_seen}，稍后从第一页重新获取'
                 )
                 await asyncio.sleep(attempts)
     except ItemSyncInProgress as exc:

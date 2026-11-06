@@ -182,6 +182,37 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['total_count'], 3)
         self.assertEqual(self.runtime.get_item_list_info.await_count, 2)
 
+    async def test_overflow_mismatch_error_reports_actual_numbers(self):
+        """报错必须带实际数字，否则维护者无从定位（issue #122）。
+
+        场景：平台说总共 2 条，实际却返回了 3 条。三轮都这样 → 最终失败，
+        错误文案里要能直接看到「已抓取 3 条，平台返回 2 条」。
+        """
+        result = await self.sync([page(['a', 'b', 'c'], has_next=True, total_count=2)] * 3)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['attempts'], 3)
+        self.assertIn('已抓取 3 条', result['error'])
+        self.assertIn('平台返回 2 条', result['error'])
+        self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_shortfall_mismatch_error_reports_per_page_sizes(self):
+        """各页条数明细是区分「漏页」和「口径不同」的关键证据。
+
+        [1, 0] 说明第一页就不满、第二页直接空，属于平台总数虚高；
+        如果是 [20, 3, 20] 则说明中间漏页。两者排查方向完全不同。
+        """
+        result = await self.sync(
+            [page(['stale'], has_next=False, total_count=2),
+             page([], has_next=False, total_count=2)] * 3
+        )
+        self.assertFalse(result['success'])
+        self.assertEqual(result['attempts'], 3)
+        self.assertIn('已抓取 1 条', result['error'])
+        self.assertIn('平台返回 2 条', result['error'])
+        self.assertIn('各页条数', result['error'])
+        self.assertIn('[1, 0]', result['error'])
+        self.db.reconcile_item_listing.assert_not_called()
+
     async def test_count_mismatch_restarts_without_merging_different_snapshots(self):
         result = await self.sync([
             page(['stale'], has_next=False, total_count=2),

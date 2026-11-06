@@ -198,8 +198,8 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_shortfall_mismatch_error_reports_per_page_sizes(self):
         """各页条数明细是区分「漏页」和「口径不同」的关键证据。
 
-        [1, 0] 说明第一页就不满、第二页直接空，属于平台总数虚高；
-        如果是 [20, 3, 20] 则说明中间漏页。两者排查方向完全不同。
+        [1, 0] 表示第一页不满、第二页为空；保留这些观察值，
+        供排查分页遗漏或平台统计口径，不能仅凭条数断言根因。
         """
         result = await self.sync(
             [page(['stale'], has_next=False, total_count=2),
@@ -211,6 +211,7 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('平台返回 2 条', result['error'])
         self.assertIn('各页条数', result['error'])
         self.assertIn('[1, 0]', result['error'])
+        self.assertIn('每页请求 1 条', result['error'])
         self.db.reconcile_item_listing.assert_not_called()
 
     async def test_count_mismatch_restarts_without_merging_different_snapshots(self):

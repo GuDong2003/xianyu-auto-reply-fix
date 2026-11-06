@@ -1377,19 +1377,7 @@ class XianyuLive:
                 logger.info(state_msg)
 
     async def _interruptible_sleep(self, duration: float):
-        """可中断的 sleep。
-
-        历史实现把每段 sleep 拆成 1 秒一片循环，注释说是为了"及时响应取消信号"。
-        但 `asyncio.sleep` 本身就能被 `task.cancel()` 立刻打断 —— 已实测：
-        60 秒的 sleep 在 0.3 秒时 cancel，立即抛 CancelledError，不需要分片。
-
-        分片的代价：5 个常驻循环 × 每个账号，按各自间隔累计约 **86.4 万次唤醒/天**
-        （单账号），每次唤醒约 0.146ms，而原生 sleep 只要 0.03ms。这部分纯属白烧，
-        笔记本上表现为待机功耗偏高。
-
-        Args:
-            duration: 总睡眠时间（秒）
-        """
+        """直接等待指定秒数；任务取消会立即中断，无需每秒分片唤醒。"""
         await asyncio.sleep(max(0.0, float(duration)))
 
     def _reset_stream_activity_state(self, connected_at: Optional[float] = None):
@@ -3279,14 +3267,15 @@ class XianyuLive:
                     process_rate = stats['processed'] / elapsed if elapsed > 0 else 0
                     drop_rate = (stats['dropped_full'] + stats['dropped_expired']) / stats['received'] * 100
 
-                    # 每分钟一条，队列健康时零信息量。改成：有丢弃/错误/积压必报，
-                    # 否则 30 分钟一条，让日志留给真正的问题。
+                    # 错误计数是累计值，只用本轮增量判断是否出现新问题。
+                    problem_counts = (stats['dropped_full'], stats['dropped_expired'], stats['errors'])
+                    previous_counts = getattr(self, '_last_queue_problem_counts', (0, 0, 0))
+                    has_new_drops = any(current > previous for current, previous in zip(problem_counts[:2], previous_counts[:2]))
                     has_problem = (
-                        stats['dropped_full'] > 0
-                        or stats['dropped_expired'] > 0
-                        or stats['errors'] > 0
+                        any(current > previous for current, previous in zip(problem_counts, previous_counts))
                         or self.message_queue.qsize() > 0
                     )
+                    self._last_queue_problem_counts = problem_counts
                     if has_problem or (time.time() - getattr(self, '_last_queue_stats_log_at', 0) >= 1800):
                         self._last_queue_stats_log_at = time.time()
                         logger.info(
@@ -3302,7 +3291,7 @@ class XianyuLive:
                         )
 
                     # 如果丢弃率过高，发出警告
-                    if drop_rate > 10:
+                    if drop_rate > 10 and has_new_drops:
                         logger.warning(f"【{self.cookie_id}】⚠️ 消息丢弃率过高({drop_rate:.1f}%)，建议增加工作协程数量或检查消息处理效率")
                 
                 # 重置统计
@@ -13820,7 +13809,12 @@ class XianyuLive:
             if not response_mid or response_mid not in self.pending_heartbeat_mids:
                 return False
 
-            self.last_heartbeat_response = time.time()
+            now_hb = time.time()
+            previous_response = self.last_heartbeat_response
+            was_stale = getattr(self, '_hb_was_stale', False) or (
+                previous_response > 0 and now_hb - previous_response > self.heartbeat_interval * 3
+            )
+            self.last_heartbeat_response = now_hb
             try:
                 self.pending_heartbeat_mids.remove(response_mid)
             except ValueError:
@@ -13828,12 +13822,11 @@ class XianyuLive:
             # 保留 WARNING 级别作为"WS 真的通了"的判据，但按窗口节流：
             # 原来 15 秒一条，单账号一天 5760 行，真故障反而被埋掉。
             # 断线恢复后的首条一定记录（_hb_was_stale），窗口判断不拦它。
-            now_hb = self.last_heartbeat_response
             prev_hb = getattr(self, '_last_hb_log_at', 0) or 0
-            if (now_hb - prev_hb >= self.HEARTBEAT_LOG_INTERVAL_SECONDS) or getattr(self, '_hb_was_stale', False):
+            if (now_hb - prev_hb >= self.HEARTBEAT_LOG_INTERVAL_SECONDS) or was_stale:
                 logger.warning(
                     f"【{self.cookie_id}】心跳响应正常 [ID:{response_mid}]"
-                    + ("（此前有中断，已恢复）" if getattr(self, '_hb_was_stale', False) else "")
+                    + ("（此前有中断，已恢复）" if was_stale else "")
                 )
                 self._last_hb_log_at = now_hb
                 self._hb_was_stale = False

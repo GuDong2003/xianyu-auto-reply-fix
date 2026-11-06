@@ -57,9 +57,8 @@ async def sync_all_item_pages(
             for attempts, current_page_size in enumerate(page_sizes, 1):
                 # 商品顺序可能在两次请求间变化，不合并不同轮次的快照。
                 items, seen_ids, pages, saved = [], set(), 0, 0
-                # 记录本轮每页实际条数，用于区分「漏页」和「平台总数口径不同」：
-                # [20, 20, 3] 且已结束 = 末页不满，属正常收尾，对不上多半是口径问题；
-                # [20, 3, 20] = 中间页不满却不是最后一页，那是真漏页。
+                # 记录本轮实际条数，辅助排查分页遗漏和总数统计口径；
+                # 仅凭短页不能确定原因，仍须结合分页标记与真实平台响应。
                 page_sizes_seen = []
                 expected_total = None
                 started_ns = time.time_ns()
@@ -107,7 +106,8 @@ async def sync_all_item_pages(
                     if expected_total is not None and len(items) > expected_total:
                         retry_reason = (
                             f'商品数量与平台返回总数不一致（已抓取 {len(items)} 条，'
-                            f'平台返回 {expected_total} 条，共 {pages} 页）'
+                            f'平台返回 {expected_total} 条，已请求 {pages} 页，'
+                            f'每页请求 {current_page_size} 条，各页条数 {page_sizes_seen}）'
                         )
                         break
 
@@ -118,7 +118,8 @@ async def sync_all_item_pages(
                             if not current:
                                 retry_reason = (
                                     f'商品数量与平台返回总数不一致（已抓取 {len(items)} 条，'
-                                    f'平台返回 {expected_total} 条，共 {pages} 页，'
+                                    f'平台返回 {expected_total} 条，已请求 {pages} 页，'
+                                    f'每页请求 {current_page_size} 条，'
                                     f'各页条数 {page_sizes_seen}）'
                                 )
                                 break
@@ -134,7 +135,7 @@ async def sync_all_item_pages(
                     return result(False, f'商品列表自动获取 {attempts} 轮后仍未通过完整性校验：{retry_reason}，未更新下架状态')
                 logger.warning(
                     f'商品列表第 {attempts} 轮校验失败：{retry_reason}；'
-                    f'本轮各页条数 {page_sizes_seen}，稍后从第一页重新获取'
+                    f'本轮每页请求 {current_page_size} 条，各页条数 {page_sizes_seen}，稍后从第一页重新获取'
                 )
                 await asyncio.sleep(attempts)
     except ItemSyncInProgress as exc:

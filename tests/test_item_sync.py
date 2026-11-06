@@ -418,6 +418,34 @@ class ItemListingDatabaseTests(unittest.TestCase):
         self.db.reconcile_item_listing('a', {'kept'}, started)
         self.assertTrue(self.db.get_item_info('a', 'removed')['is_listed'])
 
+    def test_seen_exactly_at_sync_start_is_not_unlisted(self):
+        """边界必须严格小于才算"同步前观察到"。
+
+        场景：同步开始时刻 `started_ns` 与被观察时刻完全相同。它算"同步期间
+        观察到"，必须保留。原来写 `<=` 会把它当"同步前"下架。
+
+        这条用**确定值**锁定语义，不依赖 time.time_ns() 的精度 —— 上面那条
+        `test_observed_during_sync_not_mistakenly_unlisted` 靠两次真实取时间，
+        万一落在同一纳秒就随机失败（实测负载下约 1/5 概率），定位成本很高。
+        """
+        fixed_ns = 1_800_000_000_000_000_000
+        with mock.patch('db_manager.time.time_ns', return_value=fixed_ns):
+            self.db.mark_items_listed('a', ['removed'])
+        # 同步起点与观察时刻相同
+        self.db.reconcile_item_listing('a', {'kept'}, fixed_ns)
+        self.assertTrue(
+            self.db.get_item_info('a', 'removed')['is_listed'],
+            '与同步起点同一时刻观察到的商品不应被下架',
+        )
+
+    def test_seen_before_sync_start_is_unlisted(self):
+        """严格早于起点、又不在本次快照里 → 应该被软下架。"""
+        seen_ns = 1_800_000_000_000_000_000
+        with mock.patch('db_manager.time.time_ns', return_value=seen_ns):
+            self.db.mark_items_listed('a', ['removed'])
+        self.assertEqual(self.db.reconcile_item_listing('a', {'kept'}, seen_ns + 1), 1)
+        self.assertFalse(self.db.get_item_info('a', 'removed')['is_listed'])
+
     def test_old_schema_upgrade_keeps_existing_items_listed(self):
         with tempfile.TemporaryDirectory() as directory:
             import sqlite3

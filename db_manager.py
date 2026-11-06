@@ -6553,10 +6553,14 @@ Cookie数量: {cookie_count}
             cursor.execute('CREATE TEMP TABLE IF NOT EXISTS item_listing_snapshot (item_id TEXT PRIMARY KEY)')
             cursor.execute('DELETE FROM item_listing_snapshot')
             cursor.executemany('INSERT INTO item_listing_snapshot VALUES (?)', ((str(x),) for x in set(item_ids)))
+            # 边界用严格小于：last_listing_seen_ns == started_ns 表示"与同步起点同一时刻
+            # 观察到"，属于同步期间的新观察，必须保留。
+            # 原来写 <= 会把它当成"同步前"而下架 —— time.time_ns() 在快速连续调用时
+            # 可能取到相同值，于是同一份数据时而保留时而误下架（表现为测试偶发失败）。
             cursor.execute('''
                 UPDATE item_info SET is_listed = 0, updated_at = CURRENT_TIMESTAMP
                 WHERE cookie_id = ? AND is_listed != 0
-                  AND last_listing_seen_ns <= ?
+                  AND last_listing_seen_ns < ?
                   AND item_id NOT IN (SELECT item_id FROM item_listing_snapshot)
             ''', (cookie_id, started_ns))
             unlisted_count = cursor.rowcount

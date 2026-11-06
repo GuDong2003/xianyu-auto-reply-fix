@@ -26,6 +26,7 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
         self.db.reconcile_item_listing.return_value = 2
         self.runtime = SimpleNamespace(cookie_id='synthetic-account', get_item_list_info=mock.AsyncMock())
         self.enterContext(mock.patch('utils.item_sync.asyncio.sleep', new=mock.AsyncMock()))
+        self.enterContext(mock.patch.object(logger, '_log'))
 
     async def sync(self, responses, **kwargs):
         self.runtime.get_item_list_info.side_effect = responses
@@ -49,6 +50,7 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
         result = await self.sync([{'error': 'synthetic failure'}])
         self.assertFalse(result['success'])
         self.assertFalse(result['partial'])
+        self.runtime.get_item_list_info.assert_awaited_once()
         self.db.reconcile_item_listing.assert_not_called()
 
     async def test_later_failure_keeps_partial_count_but_does_not_reconcile(self):
@@ -67,9 +69,69 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['success'])
         self.assertEqual(result['total_pages'], 2)
 
+    async def test_large_catalog_fetches_every_page_with_or_without_pagination_metadata(self):
+        for total in (1000, 1001, 10001):
+            for with_metadata in (False, True):
+                with self.subTest(total=total, with_metadata=with_metadata):
+                    item_ids = [f'item-{index}' for index in range(total)]
+
+                    async def get_page(page_number, page_size, **kwargs):
+                        start = (page_number - 1) * page_size
+                        metadata = {'has_next': start + page_size < total, 'total_count': total} if with_metadata else {}
+                        self.db.reconcile_item_listing.assert_not_called()
+                        return page(item_ids[start:start + page_size], **metadata)
+
+                    self.runtime.get_item_list_info.reset_mock()
+                    self.db.reconcile_item_listing.reset_mock()
+                    self.runtime.get_item_list_info.side_effect = get_page
+                    result = await sync_all_item_pages(self.runtime, self.db)
+                    self.assertTrue(result['success'])
+                    self.assertTrue(result['complete'])
+                    self.assertEqual(result['attempts'], 1)
+                    self.assertEqual(result['total_count'], total)
+                    self.assertEqual([item['id'] for item in result['items']], item_ids)
+                    expected_pages = (total + 19) // 20 if with_metadata else total // 20 + 1
+                    self.assertEqual(result['total_pages'], expected_pages)
+                    self.assertEqual(self.runtime.get_item_list_info.await_count, expected_pages)
+                    self.assertEqual(self.runtime.get_item_list_info.await_args.args[0], expected_pages)
+                    self.db.reconcile_item_listing.assert_called_once()
+                    self.assertEqual(self.db.reconcile_item_listing.call_args.args[1], set(item_ids))
+
+    async def test_large_catalog_recovers_late_missing_items_with_smaller_pages(self):
+        item_ids = [f'item-{index}' for index in range(1001)]
+        attempt = 0
+
+        async def get_page(page_number, page_size, **kwargs):
+            nonlocal attempt
+            if page_number == 1:
+                attempt += 1
+            self.db.reconcile_item_listing.assert_not_called()
+            start = (page_number - 1) * page_size
+            current_ids = item_ids[start:start + page_size]
+            if attempt < 3 and page_number == 50:
+                current_ids = current_ids[:10]
+            return page(current_ids, has_next=start + page_size < len(item_ids), total_count=len(item_ids))
+
+        self.runtime.get_item_list_info.side_effect = get_page
+        result = await sync_all_item_pages(self.runtime, self.db)
+        self.assertTrue(result['success'])
+        self.assertEqual(result['attempts'], 3)
+        self.assertEqual(result['total_count'], 1001)
+        self.assertEqual(result['total_saved'], 1001)
+        self.assertEqual(result['total_pages'], 101)
+        self.assertEqual([item['id'] for item in result['items']], item_ids)
+        self.assertEqual(self.runtime.get_item_list_info.await_args.args, (101, 10))
+        self.db.reconcile_item_listing.assert_called_once()
+        self.assertEqual(self.db.reconcile_item_listing.call_args.args[1], set(item_ids))
+
     async def test_duplicate_ids_in_or_between_pages_are_not_complete(self):
         for responses in ([page(['a', 'a'])], [page(['a', 'b']), page(['a'])]):
-            self.assertFalse((await self.sync(responses))['success'])
+            self.runtime.get_item_list_info.reset_mock()
+            result = await self.sync(responses * 3)
+            self.assertFalse(result['success'])
+            self.assertEqual(result['attempts'], 3)
+            self.assertIn('重复记录', result['error'])
+            self.assertEqual(self.runtime.get_item_list_info.await_count, len(responses) * 3)
         self.db.reconcile_item_listing.assert_not_called()
 
     async def test_malformed_incomplete_and_inconsistent_pages_are_rejected(self):
@@ -77,11 +139,184 @@ class ItemSyncTests(unittest.IsolatedAsyncioTestCase):
             {'success': True},
             page(['']), page(['auto_invalid']),
             page(['a'], saved_count=0),
-            page([], has_next=True), page(['a'], has_next='false'),
-            page(['a'], total_count=3),
+            page(['a'], has_next='false'),
+            page(['a'], total_count=-1), page(['a'], total_count=True),
         ):
+            self.runtime.get_item_list_info.reset_mock()
             self.assertFalse((await self.sync([response]))['success'])
+            self.runtime.get_item_list_info.assert_awaited_once()
         self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_read_mode_skips_reconciliation_even_for_complete_or_empty_lists(self):
+        for ids in (['a'], []):
+            with self.subTest(ids=ids):
+                result = await self.sync(
+                    [page(ids, has_next=False, total_count=len(ids))],
+                    reconcile_listing=False,
+                )
+                self.assertTrue(result['success'])
+                self.assertTrue(result['complete'])
+                self.assertFalse(result['partial'])
+                self.assertEqual(result['unlisted_count'], 0)
+        self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_short_page_continues_using_total_from_an_earlier_page(self):
+        result = await self.sync([
+            page(['a'], total_count=3),
+            page(['b', 'c']),
+            page([]),
+        ])
+        self.assertTrue(result['success'])
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(result['total_pages'], 3)
+        self.assertEqual([item['id'] for item in result['items']], ['a', 'b', 'c'])
+        self.db.reconcile_item_listing.assert_called_once()
+
+    async def test_premature_end_flag_is_probed_until_total_is_reached(self):
+        result = await self.sync([
+            page(['a'], has_next=False, total_count=3),
+            page(['b', 'c'], has_next=False, total_count=3),
+        ])
+        self.assertTrue(result['success'])
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(result['total_count'], 3)
+        self.assertEqual(self.runtime.get_item_list_info.await_count, 2)
+
+    async def test_count_mismatch_restarts_without_merging_different_snapshots(self):
+        result = await self.sync([
+            page(['stale'], has_next=False, total_count=2),
+            page([], has_next=False, total_count=2),
+            page(['a', 'b'], has_next=False, total_count=2),
+        ], sync_item_details=True)
+        self.assertTrue(result['success'])
+        self.assertTrue(result['complete'])
+        self.assertFalse(result['partial'])
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual(result['total_pages'], 1)
+        self.assertEqual(result['total_saved'], 2)
+        self.assertEqual([item['id'] for item in result['items']], ['a', 'b'])
+        self.assertEqual(self.runtime.get_item_list_info.await_args_list, [
+            mock.call(1, 2, sync_item_details=True),
+            mock.call(2, 2, sync_item_details=True),
+            mock.call(1, 2, sync_item_details=True),
+        ])
+        self.db.reconcile_item_listing.assert_called_once()
+        self.assertEqual(self.db.reconcile_item_listing.call_args.args[1], {'a', 'b'})
+
+    async def test_last_attempt_uses_smaller_pages_to_recover_missing_items(self):
+        missing_tail = [page(['a'], has_next=False, total_count=2), page([], has_next=False, total_count=2)]
+        result = await self.sync(missing_tail * 2 + [
+            page(['a'], has_next=True, total_count=2),
+            page(['b'], has_next=False, total_count=2),
+        ])
+        self.assertTrue(result['success'])
+        self.assertEqual(result['attempts'], 3)
+        self.assertEqual(result['total_pages'], 2)
+        self.assertEqual(result['total_saved'], 2)
+        self.assertEqual(self.runtime.get_item_list_info.await_args_list, [
+            mock.call(1, 2, sync_item_details=False),
+            mock.call(2, 2, sync_item_details=False),
+            mock.call(1, 2, sync_item_details=False),
+            mock.call(2, 2, sync_item_details=False),
+            mock.call(1, 1, sync_item_details=False),
+            mock.call(2, 1, sync_item_details=False),
+        ])
+        self.db.reconcile_item_listing.assert_called_once()
+
+    async def test_persistent_total_mismatch_fails_after_three_attempts_without_reconciliation(self):
+        for reconcile in (False, True):
+            with self.subTest(reconcile=reconcile):
+                self.runtime.get_item_list_info.reset_mock()
+                result = await self.sync([
+                    page(['a'], has_next=False, total_count=3),
+                    page([], has_next=False),
+                ] * 3, reconcile_listing=reconcile)
+                self.assertFalse(result['success'])
+                self.assertFalse(result['complete'])
+                self.assertTrue(result['partial'])
+                self.assertIn('3 轮', result['error'])
+                self.assertIn('总数不一致', result['error'])
+                self.assertEqual(result['attempts'], 3)
+                self.assertEqual(self.runtime.get_item_list_info.await_count, 6)
+                self.assertEqual(result['total_count'], 1)
+                self.assertEqual(result['total_saved'], 1)
+                self.assertEqual(result['unlisted_count'], 0)
+        self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_total_changes_between_pages_trigger_a_fresh_snapshot(self):
+        result = await self.sync([
+            page(['stale', 'a'], has_next=True, total_count=3),
+            page(['b'], has_next=False, total_count=4),
+            page(['a', 'b'], has_next=False, total_count=2),
+        ])
+        self.assertTrue(result['success'])
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual([item['id'] for item in result['items']], ['a', 'b'])
+        self.assertEqual(self.db.reconcile_item_listing.call_args.args[1], {'a', 'b'})
+
+    async def test_duplicate_page_can_recover_by_restarting_at_page_one(self):
+        result = await self.sync([
+            page(['a', 'b'], has_next=True, total_count=3),
+            page(['b', 'c'], has_next=False, total_count=3),
+            page(['b', 'c'], has_next=False, total_count=2),
+        ])
+        self.assertTrue(result['success'])
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual([item['id'] for item in result['items']], ['b', 'c'])
+        self.db.reconcile_item_listing.assert_called_once()
+
+    async def test_missing_total_on_the_last_page_does_not_hide_a_mismatch(self):
+        async def get_page(page_number, page_size, **kwargs):
+            if page_number == 1:
+                return page(['a'], has_next=True, total_count=3)
+            if page_number == 2:
+                return page(['b'], has_next=False)
+            return page([], has_next=False)
+
+        self.runtime.get_item_list_info.side_effect = get_page
+        result = await sync_all_item_pages(self.runtime, self.db, page_size=2)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['attempts'], 3)
+        self.assertIn('总数不一致', result['error'])
+        self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_contradictory_empty_pages_or_totals_never_allow_reconciliation(self):
+        for response in (
+            page([], has_next=False, total_count=3),
+            page([], has_next=True),
+            page(['a'], has_next=False, total_count=0),
+        ):
+            with self.subTest(response=response):
+                self.runtime.get_item_list_info.reset_mock()
+                result = await self.sync([response] * 3)
+                self.assertFalse(result['success'])
+                self.assertFalse(result['complete'])
+                self.assertEqual(result['attempts'], 3)
+                self.assertEqual(self.runtime.get_item_list_info.await_count, 3)
+        self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_probing_does_not_bypass_maximum_pages(self):
+        result = await self.sync([page(['a'], has_next=False, total_count=3)], max_pages=1)
+        self.assertFalse(result['success'])
+        self.assertEqual(result['attempts'], 1)
+        self.runtime.get_item_list_info.assert_awaited_once()
+        self.db.reconcile_item_listing.assert_not_called()
+
+    async def test_retry_keeps_the_account_slot_and_releases_it_on_cancellation(self):
+        import asyncio
+
+        async def cancel_during_retry(delay):
+            with self.assertRaises(ItemSyncInProgress):
+                with item_sync_slot(self.runtime.cookie_id):
+                    pass
+            raise asyncio.CancelledError()
+
+        with mock.patch('utils.item_sync.asyncio.sleep', side_effect=cancel_during_retry):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.sync([page(['a'], has_next=False, total_count=0)])
+        self.db.reconcile_item_listing.assert_not_called()
+        with item_sync_slot(self.runtime.cookie_id):
+            pass
 
     async def test_same_account_conflict_and_different_account_independence(self):
         with item_sync_slot(self.runtime.cookie_id):

@@ -18191,9 +18191,15 @@ class XianyuLive:
                 sync_item_details=sync_item_details,
             )
 
-    async def get_all_items(self, page_size=20, max_pages=None, sync_item_details=False):
-        """获取完整在售快照，仅在所有分页成功后对账下架状态。"""
-        return await sync_all_item_pages(self, db_manager, page_size, max_pages, sync_item_details)
+    async def get_all_items(
+        self, page_size=20, max_pages=None, sync_item_details=False,
+        *, reconcile_listing=True,
+    ):
+        """自动补拉和重取在售列表，完整性校验通过后按需对账下架状态。"""
+        return await sync_all_item_pages(
+            self, db_manager, page_size, max_pages, sync_item_details,
+            reconcile_listing=reconcile_listing,
+        )
 
     def _get_item_polish_module(self):
         from item_polish_module import ItemPolishModule
@@ -18208,9 +18214,9 @@ class XianyuLive:
         """使用备用API擦亮商品。"""
         return await self._get_item_polish_module()._polish_item_backup(item_id)
 
-    async def polish_all_items(self):
+    async def polish_all_items(self, on_progress=None):
         """擦亮所有在售商品。"""
-        return await self._get_item_polish_module().polish_all_items()
+        return await self._get_item_polish_module().polish_all_items(on_progress=on_progress)
 
     async def send_image_msg(self, ws, cid, toid, image_url, width=800, height=600, card_id=None):
         """发送图片消息"""

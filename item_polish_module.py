@@ -1,12 +1,17 @@
 import asyncio
 import json
 import random
+import threading
 import time
 from typing import Any
 
 from loguru import logger
 
 from utils.xianyu_utils import generate_sign, trans_cookies
+
+
+_polish_lock = threading.Lock()
+_polish_accounts = set()
 
 
 class ItemPolishModule:
@@ -134,15 +139,31 @@ class ItemPolishModule:
             logger.error(f"【{self.runtime.cookie_id}】备用API擦亮商品 {item_id} 异常: {self.runtime._safe_str(exc)}")
             return {'success': False, 'item_id': str(item_id), 'error': str(exc)}
 
-    async def polish_all_items(self) -> dict[str, Any]:
+    async def polish_all_items(self, on_progress=None) -> dict[str, Any]:
+        """同一账号一次只运行一个擦亮任务，包括手动和定时任务。"""
+        with _polish_lock:
+            if self.runtime.cookie_id in _polish_accounts:
+                return {'success': False, 'busy': True, 'message': '该账号正在擦亮商品，请等待当前任务完成'}
+            _polish_accounts.add(self.runtime.cookie_id)
+        try:
+            return await self._polish_all_items(on_progress)
+        finally:
+            with _polish_lock:
+                _polish_accounts.discard(self.runtime.cookie_id)
+
+    async def _polish_all_items(self, on_progress=None) -> dict[str, Any]:
         """擦亮所有在售商品。"""
         logger.info(f"【{self.runtime.cookie_id}】开始擦亮所有商品")
 
-        all_items_result = await self.runtime.get_all_items()
-        if not all_items_result.get('success'):
+        all_items_result = await self.runtime.get_all_items(
+            reconcile_listing=False,
+        )
+        if not all_items_result.get('success') or all_items_result.get('complete') is not True:
             return {
                 'success': False,
-                'message': f"获取商品列表失败: {all_items_result.get('error', '未知错误')}",
+                'partial': False,
+                'list_complete': False,
+                'message': f"获取商品列表失败: {all_items_result.get('error') or '无法确认完整商品列表'}",
                 'total': 0,
                 'polished': 0,
                 'failed': 0,
@@ -153,6 +174,8 @@ class ItemPolishModule:
         if not items:
             return {
                 'success': True,
+                'partial': False,
+                'list_complete': True,
                 'message': '没有在售商品需要擦亮',
                 'total': 0,
                 'polished': 0,
@@ -164,6 +187,12 @@ class ItemPolishModule:
         polished = 0
         failed = 0
         results = []
+
+        if on_progress:
+            await on_progress({
+                'stage': 'polishing', 'total': total, 'processed': 0, 'polished': 0, 'failed': 0,
+                'message': f'已获取完整列表，开始擦亮 {total} 个商品',
+            })
 
         for index, item in enumerate(items):
             item_id = item.get('id', '')
@@ -179,13 +208,24 @@ class ItemPolishModule:
                 failed += 1
 
             logger.info(f"【{self.runtime.cookie_id}】擦亮进度: {index + 1}/{total}, 成功: {polished}, 失败: {failed}")
+            if on_progress:
+                await on_progress({
+                    'stage': 'polishing', 'total': total, 'processed': index + 1,
+                    'polished': polished, 'failed': failed,
+                    'message': f'正在擦亮：{index + 1}/{total}，成功 {polished}，失败 {failed}',
+                })
 
             if index < total - 1:
                 await asyncio.sleep(random.uniform(1, 3))
 
         logger.info(f"【{self.runtime.cookie_id}】擦亮完成: 总计 {total}, 成功 {polished}, 失败 {failed}")
+        message = f"擦亮完成：总计 {total}，成功 {polished}，失败 {failed}"
+
         return {
             'success': True,
+            'partial': failed > 0,
+            'list_complete': True,
+            'message': message,
             'total': total,
             'polished': polished,
             'failed': failed,

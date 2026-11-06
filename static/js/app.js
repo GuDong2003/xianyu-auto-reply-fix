@@ -5205,12 +5205,13 @@ async function loadCookies() {
             </div>
             <div class="account-action-group account-action-group-item" aria-label="商品操作">
                 <span class="account-action-group-label">商品</span>
-                <button class="btn btn-sm btn-outline-secondary account-action-btn" onclick="polishAccountItems('${cookie.id}')" title="立即擦亮全部商品" data-action="polish-items" data-requires-enabled="true" ${!isEnabled ? 'disabled' : ''}>
+                <button class="btn btn-sm btn-outline-secondary account-action-btn" onclick="polishAccountItems('${cookie.id}')" title="立即擦亮全部商品" data-action="polish-items" data-polish-account="${escapeHtml(cookie.id)}" data-requires-enabled="true" ${!isEnabled ? 'disabled' : ''}>
                     <i class="bi bi-stars"></i><span class="action-text">擦亮</span>
                 </button>
                 <button class="btn btn-sm btn-outline-info account-action-btn" onclick="openPolishScheduleModal('${cookie.id}')" title="设置定时擦亮" data-action="polish-schedule" data-requires-enabled="true" ${!isEnabled ? 'disabled' : ''}>
                     <i class="bi bi-clock"></i><span class="action-text">定时</span>
                 </button>
+                <span class="small text-muted" data-polish-progress="${escapeHtml(cookie.id)}" aria-live="polite"></span>
             </div>
             <div class="account-action-group account-action-group-flower" aria-label="小红花操作">
                 <span class="account-action-group-label">小红花</span>
@@ -5291,22 +5292,114 @@ async function copyCookie(id) {
 }
 
 // 一键擦亮
-async function polishAccountItems(accountId) {
-    toggleLoading(true);
-    showToast('正在擦亮所有商品，请稍候...', 'info');
+const itemPolishPolls = new Map();
+
+function renderItemPolishProgress(accountId, job) {
+    const busy = job.status === 'pending' || job.status === 'running';
+    document.querySelectorAll('[data-polish-progress]').forEach(element => {
+        if (element.dataset.polishProgress === accountId) element.textContent = job.message || '';
+    });
+    document.querySelectorAll('[data-polish-account]').forEach(button => {
+        if (button.dataset.polishAccount !== accountId) return;
+        if (busy) {
+            if (button.dataset.polishWasDisabled === undefined) {
+                button.dataset.polishWasDisabled = String(button.disabled);
+            }
+            button.disabled = true;
+        } else if (button.dataset.polishWasDisabled !== undefined) {
+            button.disabled = button.dataset.polishWasDisabled === 'true';
+            delete button.dataset.polishWasDisabled;
+        }
+    });
+}
+
+function finishItemPolishPolling(accountId, state, job) {
+    clearTimeout(state.timer);
+    if (itemPolishPolls.get(accountId) === state) itemPolishPolls.delete(accountId);
+    renderItemPolishProgress(accountId, job);
+}
+
+async function pollItemPolishJob(accountId, state) {
+    if (itemPolishPolls.get(accountId) !== state) return;
+    if (authToken !== state.token) {
+        finishItemPolishPolling(accountId, state, {status: 'cancelled', message: ''});
+        return;
+    }
     try {
-        const response = await fetch(`${apiBase}/accounts/${encodeURIComponent(accountId)}/polish-items`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${authToken}` }
+        const response = await fetch(`${apiBase}/accounts/${encodeURIComponent(accountId)}/polish-items/${encodeURIComponent(state.jobId)}`, {
+            headers: {'Authorization': `Bearer ${state.token}`}
         });
         const data = await response.json();
-        if (data.success) {
-            showToast(`擦亮完成: ${data.polished}/${data.total} 个商品成功`, 'success');
-        } else {
-            showToast(`擦亮失败: ${data.message}`, 'danger');
+        if (!response.ok || !data.success || !data.job) {
+            if ([401, 403, 404].includes(response.status)) {
+                const message = data.detail || data.message || '无法查询擦亮任务，请查看任务日志';
+                finishItemPolishPolling(accountId, state, {status: 'failed', message});
+                showToast(message, 'warning');
+                return;
+            }
+            throw new Error(data.detail || data.message || '暂时无法查询擦亮进度');
+        }
+        if (authToken !== state.token) {
+            finishItemPolishPolling(accountId, state, {status: 'cancelled', message: ''});
+            return;
+        }
+        state.failures = 0;
+        renderItemPolishProgress(accountId, data.job);
+        if (!['pending', 'running'].includes(data.job.status)) {
+            finishItemPolishPolling(accountId, state, data.job);
+            const result = data.job.result || {};
+            const tone = data.job.status === 'completed'
+                ? (result.partial || Number(result.failed) > 0 ? 'warning' : 'success') : 'danger';
+            showToast(data.job.message, tone);
+            return;
         }
     } catch (error) {
-        showToast(`擦亮请求异常: ${error.message}`, 'danger');
+        if (authToken !== state.token) {
+            finishItemPolishPolling(accountId, state, {status: 'cancelled', message: ''});
+            return;
+        }
+        state.failures += 1;
+        renderItemPolishProgress(accountId, {
+            status: 'running', message: '进度暂时无法获取，后台任务继续执行，正在重新查询…'
+        });
+    }
+    state.timer = setTimeout(() => pollItemPolishJob(accountId, state), Math.min(15000, 3000 * (state.failures + 1)));
+}
+
+async function polishAccountItems(accountId) {
+    if (itemPolishPolls.has(accountId)) {
+        showToast('该账号已有擦亮任务，正在查询进度', 'info');
+        return;
+    }
+    const state = {jobId: null, token: authToken, failures: 0, timer: null};
+    itemPolishPolls.set(accountId, state);
+    renderItemPolishProgress(accountId, {status: 'pending', message: '正在启动擦亮任务…'});
+    toggleLoading(true);
+    try {
+        const response = await fetch(`${apiBase}/accounts/${encodeURIComponent(accountId)}/polish-items?background=true`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${state.token}` }
+        });
+        const data = await response.json();
+        if (authToken !== state.token) {
+            finishItemPolishPolling(accountId, state, {status: 'cancelled', message: ''});
+            return;
+        }
+        if (!response.ok || !data.success) throw new Error(data.detail || data.message || '启动擦亮任务失败');
+        if (data.accepted && data.job) {
+            state.jobId = data.job.job_id;
+            renderItemPolishProgress(accountId, data.job);
+            showToast('擦亮任务已在后台启动，可继续使用其他功能', 'info');
+            state.timer = setTimeout(() => pollItemPolishJob(accountId, state), 1000);
+        } else {
+            finishItemPolishPolling(accountId, state, {status: 'completed', message: data.message});
+            const partial = data.partial || Number(data.failed) > 0;
+            showToast(data.message || `擦亮完成: ${data.polished}/${data.total} 个商品成功`, partial ? 'warning' : 'success');
+        }
+    } catch (error) {
+        const message = authToken === state.token ? error.message : '';
+        finishItemPolishPolling(accountId, state, {status: 'failed', message});
+        if (message) showToast(`擦亮请求异常: ${message}`, 'danger');
     } finally {
         toggleLoading(false);
     }

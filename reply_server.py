@@ -42,6 +42,7 @@ from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
 from utils.item_pagination import MAX_ITEM_LIST_PAGE_SIZE
 from utils.item_sync import ItemSyncInProgress, item_sync_slot
+from utils.item_polish_jobs import ItemPolishJobs
 from utils.notification_templates import validate_channel_templates
 from utils.product_sku import ProductSkuValidationError, normalize_sku_config
 from utils.time_utils import (
@@ -15959,8 +15960,52 @@ async def restart_application(current_user: Dict[str, Any] = Depends(get_current
 
 # ==================== 一键擦亮API ====================
 
+item_polish_jobs = ItemPolishJobs()
+
+
+async def _execute_manual_item_polish(cid: str, cookies_str: str, on_progress=None):
+    batch_id = f"manual_polish_{uuid.uuid4()}"
+    try:
+        from XianyuAutoAsync import XianyuLive
+
+        xianyu_instance = XianyuLive(cookies_str, cid, register_instance=False)
+        try:
+            result = await xianyu_instance.polish_all_items(on_progress=on_progress)
+        finally:
+            await xianyu_instance.close_session()
+        total = int(result.get('total') or 0)
+        polished = int(result.get('polished') or 0)
+        failed = int(result.get('failed') or 0)
+        if result.get('success') and failed == 0 and not result.get('partial'):
+            status = 'success'
+        elif result.get('success') and polished > 0:
+            status = 'partial_success'
+        else:
+            status = 'failed'
+        message = result.get('message') or f"擦亮完成：总计 {total}，成功 {polished}，失败 {failed}"
+        db_manager.add_scheduled_task_log(
+            batch_id=batch_id, task_type='item_polish', cookie_id=cid,
+            object_id='all_items', status=status, message=message, raw_response=result,
+        )
+        return result
+    except asyncio.CancelledError:
+        db_manager.add_scheduled_task_log(
+            batch_id=batch_id, task_type='item_polish', cookie_id=cid,
+            status='failed', message='擦亮任务已中断，部分商品可能已经处理',
+        )
+        raise
+    except Exception:
+        db_manager.add_scheduled_task_log(
+            batch_id=batch_id, task_type='item_polish', cookie_id=cid,
+            status='failed', message='擦亮任务异常中断，部分商品可能已经处理',
+        )
+        return {'success': False, 'message': '擦亮任务异常中断，请查看任务日志'}
+
+
 @app.post("/accounts/{cid}/polish-items")
-async def polish_account_items(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+async def polish_account_items(
+    cid: str, current_user: Dict[str, Any] = Depends(get_current_user), background: bool = False,
+):
     """擦亮指定账号的所有在售商品"""
     try:
         cid = _ensure_cookie_access(cid, current_user)
@@ -15987,32 +16032,17 @@ async def polish_account_items(cid: str, current_user: Dict[str, Any] = Depends(
             )
             return {"success": False, "message": "账号cookie信息为空"}
 
-        from XianyuAutoAsync import XianyuLive
-        xianyu_instance = XianyuLive(cookies_str, cid, register_instance=False)
-
-        logger.info(f"开始擦亮账号 {cid} 的所有商品")
-        try:
-            result = await xianyu_instance.polish_all_items()
-        finally:
-            await xianyu_instance.close_session()
-
-        total = int(result.get('total') or 0) if isinstance(result, dict) else 0
-        polished = int(result.get('polished') or 0) if isinstance(result, dict) else 0
-        failed = int(result.get('failed') or 0) if isinstance(result, dict) else 0
-        status = 'success' if result.get('success') and failed == 0 else ('partial_success' if result.get('success') and polished > 0 else 'failed')
-        message = result.get('message') or f"擦亮完成：总计 {total}，成功 {polished}，失败 {failed}"
-        db_manager.add_scheduled_task_log(
-            batch_id=batch_id,
-            task_type='item_polish',
-            cookie_id=cid,
-            object_id='all_items',
-            status=status,
-            message=message,
-            raw_response=result,
-        )
-
-        return result
-
+        if background:
+            job = item_polish_jobs.start(
+                cid, current_user['user_id'],
+                lambda progress: _execute_manual_item_polish(cid, cookies_str, progress),
+            )
+            return {'success': True, 'accepted': True, 'job': job}
+        return await _execute_manual_item_polish(cid, cookies_str)
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except Exception as e:
         logger.error(f"擦亮账号商品异常: {str(e)}")
         try:
@@ -16026,6 +16056,18 @@ async def polish_account_items(cid: str, current_user: Dict[str, Any] = Depends(
         except Exception:
             pass
         return {"success": False, "message": f"擦亮异常: {str(e)}"}
+
+
+@app.get("/accounts/{cid}/polish-items/{job_id}")
+async def get_item_polish_job(cid: str, job_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    cid = _ensure_cookie_access(cid, current_user)
+    try:
+        job = item_polish_jobs.get(job_id, cid, current_user['user_id'])
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {'success': True, 'job': job}
 
 
 # ==================== 定时任务管理API ====================
@@ -16268,8 +16310,10 @@ async def scheduled_task_checker():
                             else:
                                 from XianyuAutoAsync import XianyuLive
                                 xianyu_instance = XianyuLive(cookies_str, account_id, register_instance=False)
-                                result = await xianyu_instance.polish_all_items()
-                                await xianyu_instance.close_session()
+                                try:
+                                    result = await xianyu_instance.polish_all_items()
+                                finally:
+                                    await xianyu_instance.close_session()
                     else:
                         result = {"success": False, "message": f"未知任务类型: {task_type}"}
 
@@ -16286,7 +16330,12 @@ async def scheduled_task_checker():
                         total = int(result.get('total') or 0) if isinstance(result, dict) else 0
                         polished = int(result.get('polished') or 0) if isinstance(result, dict) else 0
                         failed = int(result.get('failed') or 0) if isinstance(result, dict) else 0
-                        status = 'success' if result.get('success') and failed == 0 else ('partial_success' if result.get('success') and polished > 0 else 'failed')
+                        if result.get('success') and failed == 0 and not result.get('partial'):
+                            status = 'success'
+                        elif result.get('success') and polished > 0:
+                            status = 'partial_success'
+                        else:
+                            status = 'failed'
                         message = result.get('message') or f"定时任务执行完成：总计 {total}，成功 {polished}，失败 {failed}"
                         db_manager.add_scheduled_task_log(
                             batch_id=f"scheduled_task_{task_id}_{uuid.uuid4()}",

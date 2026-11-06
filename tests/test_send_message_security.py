@@ -211,6 +211,33 @@ class SendMessageSecurityTests(unittest.TestCase):
             self.assertFalse(response.json()['success'])
         self.assertEqual(self.live.close_session.await_count, 2)
 
+    def test_manual_polish_logs_partial_lists_and_item_failures_accurately(self):
+        self.live.polish_all_items = mock.AsyncMock()
+        self.live.close_session = mock.AsyncMock()
+        sys.modules['XianyuAutoAsync'].XianyuLive.return_value = self.live
+        for success, partial, polished, failed, expected_status in (
+            (True, False, 2, 0, 'success'),
+            (True, True, 2, 0, 'partial_success'),
+            (True, True, 1, 1, 'partial_success'),
+            (True, True, 0, 2, 'failed'),
+            (False, False, 0, 0, 'failed'),
+        ):
+            with self.subTest(expected_status=expected_status, partial=partial, polished=polished):
+                result = {
+                    'success': success, 'partial': partial, 'total': polished + failed,
+                    'polished': polished, 'failed': failed, 'message': 'Synthetic polish result',
+                }
+                self.live.polish_all_items.return_value = result
+                self.live.close_session.reset_mock()
+                with mock.patch.object(self.db, 'add_scheduled_task_log') as task_log:
+                    response = self.client.post('/accounts/owned-account/polish-items', headers=self.headers())
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), result)
+                self.assertEqual(task_log.call_args.kwargs['status'], expected_status)
+                self.assertEqual(task_log.call_args.kwargs['message'], result['message'])
+                self.assertEqual(task_log.call_args.kwargs['raw_response'], result)
+                self.live.close_session.assert_awaited_once()
+
     def test_item_lists_hide_unlisted_by_default_and_keep_details_accessible(self):
         self.db.conn.execute('''INSERT OR REPLACE INTO item_info
             (cookie_id, item_id, item_title, is_listed) VALUES ('owned-account', 'old-item', 'Old item', 0)''')

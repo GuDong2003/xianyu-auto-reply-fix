@@ -23,7 +23,7 @@ class NodeRuntimeTests(unittest.TestCase):
                 self.configure_version(version)
 
     def test_rejects_vulnerable_and_unsupported_release_lines(self):
-        for version in ("v22.23.3", "v24.14.1", "v24.21.0", "v26.12.0", "v20.20.0", "v25.9.0"):
+        for version in ("v18.20.4", "v22.23.3", "v24.14.1", "v24.21.0", "v26.12.0", "v20.20.0", "v25.9.0"):
             with self.subTest(version=version), self.assertRaisesRegex(RuntimeError, "安全版本"):
                 self.configure_version(version)
 

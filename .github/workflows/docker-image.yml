@@ -26,10 +26,15 @@ jobs:
       contents: read
       packages: write
     runs-on: ubuntu-latest
+    env:
+      SMOKE_IMAGE: xianyu-runtime-smoke:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -75,6 +80,21 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=sha,enable=${{ github.event_name == 'push' }},format=short
+
+      - name: Build image for startup validation
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          pull: true
+          tags: ${{ env.SMOKE_IMAGE }}
+          cache-from: type=gha
+
+      - name: Validate runtime and application startup
+        run: python3 .github/scripts/container_smoke.py "$SMOKE_IMAGE"
 
       - name: Build and push multi-arch images
         uses: docker/build-push-action@v5

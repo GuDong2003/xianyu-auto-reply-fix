@@ -92,6 +92,30 @@ docker compose -f docker-compose-cn.yml up -d --build
 
 访问：`http://localhost:8000`
 
+### 修复旧镜像内的 Node 版本
+
+镜像使用官方 Node 24.22.2 Bookworm 运行时，构建时执行与应用启动相同的安全版本校验。默认和国内 Dockerfile 均支持通过 `--build-arg NODE_IMAGE=...` 指定同版本、同架构的兼容镜像源。
+
+从含 Node 18 的旧镜像升级时，需要更换镜像中的运行时。普通代码热更新、重启容器或升级宿主机 Node 无法完成这一步。默认 Compose 还挂载了当前目录的源码，因此先同步仓库。
+
+使用源码重新构建：
+
+```bash
+git pull
+docker compose build --pull xianyu-app
+docker compose up -d --no-build --force-recreate xianyu-app
+```
+
+使用已发布的 GHCR 镜像：
+
+```bash
+git pull
+docker compose pull xianyu-app
+docker compose up -d --no-build --force-recreate xianyu-app
+```
+
+国内配置可将命令中的 `docker compose` 换成 `docker compose -f docker-compose-cn.yml`，使用源码构建路径。
+
 ## 方式三：本地运行
 
 ```bash

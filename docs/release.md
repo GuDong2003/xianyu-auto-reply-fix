@@ -2,7 +2,7 @@
 
 > 返回：[README](../README.md) ｜ 相关：[部署与运行指南](deployment.md) ｜ [配置说明](configuration.md)
 
-当前仓库的 GitHub Actions 会在 `push` 到 `main` 后读取 `static/version.txt`。如果该版本对应的 Release 还不存在，则会自动生成 `update_files.json` 并创建同名 Release。
+当前仓库在 `push` 到 `main` 后先构建镜像，并用临时容器验证 Node、PyExecJS、Playwright Chromium 和默认入口的 `/health`。检查通过后才推送多架构镜像；镜像工作流成功后，再读取该次受测提交的 `static/version.txt`，生成 `update_files.json` 并创建同名 Release。构建或启动验证失败时不创建正式 Release。
 
 ## 自动纳入热更新清单的文件
 
@@ -30,6 +30,6 @@
    ```
 
 5. 提交并 `push` 到 `main`。
-6. 等待 Action 自动生成 Release 和 `update_files.json`。
+6. 等待容器启动验证、多架构镜像构建和推送成功，再确认自动生成的 Release 与 `update_files.json`。
 
 热更新在覆盖和新增文件之外，还支持通过 manifest 的 `deleted_files` 清理旧文件。删除前会先备份原文件，再执行清理。

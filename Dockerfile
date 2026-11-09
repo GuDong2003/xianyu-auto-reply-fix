@@ -2,6 +2,8 @@
 # 支持通过构建参数指定镜像源（解决多架构构建时的网络问题）
 # 使用方法：docker build --build-arg BASE_IMAGE=ccr.ccs.tencentyun.com/dockerp/library/python:3.11-slim-bookworm
 ARG BASE_IMAGE=python:3.11-slim-bookworm
+ARG NODE_IMAGE=node:24.22.2-bookworm-slim
+FROM ${NODE_IMAGE} AS node-runtime
 FROM ${BASE_IMAGE}
 
 # 设置标签信息
@@ -23,6 +25,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV TZ=Asia/Shanghai
 ENV DOCKER_ENV=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
+ENV NODE_PATH=/usr/local/lib/node_modules
 
 # Use HTTPS Debian mirrors with retries; HTTP and some domestic mirrors are unreliable here.
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
@@ -31,8 +35,8 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
 RUN apt-get -o Acquire::Retries=5 update && \
     apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
         # 基础工具
-        nodejs \
-        npm \
+        libstdc++6 \
+        libatomic1 \
         tzdata \
         curl \
         ca-certificates \
@@ -85,9 +89,16 @@ RUN apt-get -o Acquire::Retries=5 update && \
 # 设置时区
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# 验证Node.js安装并设置环境变量
-RUN node --version && npm --version
-ENV NODE_PATH=/usr/lib/node_modules
+# 从同为 Bookworm 的官方镜像复制对应架构的 Node，避免 Debian 源的 Node 18。
+# 可通过 --build-arg NODE_IMAGE=... 指定兼容镜像源。
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+COPY utils/node_runtime.py /app/utils/node_runtime.py
+RUN ln -sf /usr/local/bin/node /usr/local/bin/nodejs && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    python -c "from utils.node_runtime import configure_playwright_node; configure_playwright_node()" && \
+    node --version && npm --version
 
 # 复制requirements.txt并安装Python依赖
 COPY requirements.txt .

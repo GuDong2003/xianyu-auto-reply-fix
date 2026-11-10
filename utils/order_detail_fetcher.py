@@ -96,22 +96,20 @@ class OrderDetailFetcher:
         self._pending_response_tasks = set()
         self._response_handler = None
 
-        # 请求头配置
-        self.headers = {
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "accept-language": "en,zh-CN;q=0.9,zh;q=0.8,ru;q=0.7",
-            "cache-control": "no-cache",
-            "pragma": "no-cache",
-            "priority": "u=0, i",
-            "sec-ch-ua": "\"Not)A;Brand\";v=\"8\", \"Chromium\";v=\"138\", \"Google Chrome\";v=\"138\"",
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": "\"Windows\"",
-            "sec-fetch-dest": "document",
-            "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "same-origin",
-            "sec-fetch-user": "?1",
-            "upgrade-insecure-requests": "1"
-        }
+        # 自定义请求头：**留空，全部交给浏览器自己生成**。
+        # set_extra_http_headers 是覆盖式的：一旦手写 sec-ch-ua / sec-ch-ua-platform
+        # 这类 client hints，就会与 Playwright/Chromium 实际发出的 UA 版本号脱节
+        # （手写的是 Chrome/138 + Windows，跑起来的浏览器往往不是这个版本）。
+        # 两者不一致时平台判定客户端异常，直接返回**未渲染的空壳 SPA**：
+        # body 长度 0、标题退回「闲鱼 - 闲不住？上闲鱼！」、trade.order.detail
+        # 的 XHR 根本不发 —— 表现就是「订单详情获取成功」但字段全空、状态永远
+        # unknown，付款消息一漏就漏单。cookie 完全是好的，很容易误判成页面改版。
+        #
+        # 实测（2026-10-27）：同样的 cookie，只在 fetcher 的 context 上执行
+        # set_extra_http_headers({}) 再打开订单页，body 立刻从 0 恢复到 2300 字；
+        # 只删 sec-ch-ua* 三行仍然是空壳，整组自定义头都不该存在。
+        # 改完重启实测 3 个订单，状态全部取自接口真值（已发货/已完成/漏单那单）。
+        self.headers: Dict[str, str] = {}
 
         # Cookie配置 - 支持动态传入
         self.cookie = cookie_string
@@ -202,8 +200,10 @@ class OrderDetailFetcher:
 
             logger.info("浏览器上下文创建成功，设置HTTP头...")
 
-            # 设置额外的HTTP头
-            await self.context.set_extra_http_headers(self.headers)
+            # 只在显式配置了请求头时才覆盖，避免空字典也去动浏览器默认头。
+            if self.headers:
+                await self.context.set_extra_http_headers(self.headers)
+                logger.info(f"已设置自定义HTTP头: {sorted(self.headers)}")
 
             logger.info("创建页面...")
 

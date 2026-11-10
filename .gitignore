@@ -838,4 +838,10 @@ test_php_stats.py
 !tests/test_auto_relist.py
 !tests/test_login_audit.py
 !tests/test_ai_pause.py
+!tests/test_item_publish_category.py
+!tests/test_item_publish_quantity.py
+!tests/test_item_publish_text.py
+!tests/test_order_detail_headers.py
+!tests/test_order_history_range.py
+!tests/test_slider_handler_close.py
 !docs/maintenance-progress.md

@@ -13,6 +13,46 @@ from utils.xianyu_utils import generate_sign, trans_cookies
 from utils.product_sku import build_sku_payload_fields, normalize_sku_config
 
 
+# 发布时的单品库存。
+# 旧实现把 "quantity": "1" 硬编码在 _build_publish_payload 里，每个商品只能卖 1 件：
+# 一成交库存归零，平台随即把商品自动下架，卖家必须手动重新上架才能继续卖。
+# 卖虚拟资料的场景尤其明显（一份资料可以无限复制，库存 1 等于自己给自己限流）。
+# 这里改为可配置：环境变量 PUBLISH_ITEM_QUANTITY，缺省给足 800。
+DEFAULT_ITEM_QUANTITY_FALLBACK = 800
+MAX_ITEM_QUANTITY = 9999
+
+
+def _parse_default_quantity() -> int:
+    """解析环境变量里的库存默认值。
+
+    模块级直接 `int(os.getenv(...))` 很危险：用户把环境变量写成 `abc` 或空串，
+    就会在 import 阶段抛 ValueError，整个服务起不来 —— 比原来的 bug 更严重。
+    所以这里任何解析失败都退回内置默认值。
+    """
+    raw = os.getenv("PUBLISH_ITEM_QUANTITY", "")
+    try:
+        quantity = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_ITEM_QUANTITY_FALLBACK
+    if quantity < 1:
+        return DEFAULT_ITEM_QUANTITY_FALLBACK
+    return min(quantity, MAX_ITEM_QUANTITY)
+
+
+DEFAULT_ITEM_QUANTITY = _parse_default_quantity()
+
+
+def normalize_item_quantity(value: Any) -> int:
+    """库存归一化：非法值回落默认，超范围裁剪。"""
+    try:
+        quantity = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_ITEM_QUANTITY
+    if quantity < 1:
+        return DEFAULT_ITEM_QUANTITY
+    return min(quantity, MAX_ITEM_QUANTITY)
+
+
 class ItemPublisher:
     """闲鱼商品发布服务。"""
 
@@ -293,6 +333,7 @@ class ItemPublisher:
         can_self_pickup: bool,
         category_hint: Optional[str] = None,
         sku_config: Optional[Dict[str, Any]] = None,
+        quantity: int = DEFAULT_ITEM_QUANTITY,
     ) -> Dict[str, Any]:
         if delivery_choice not in self.ALLOWED_DELIVERY_CHOICES:
             raise ValueError("不支持的运费方式")
@@ -345,6 +386,7 @@ class ItemPublisher:
             can_self_pickup=can_self_pickup,
             category_result=category_result,
             sku_config=uploaded_sku_config,
+            quantity=quantity,
         )
 
         publish_res = await self._post_mtop(
@@ -581,6 +623,7 @@ class ItemPublisher:
         can_self_pickup: bool,
         category_result: Optional[Dict[str, Any]] = None,
         sku_config: Optional[Dict[str, Any]] = None,
+        quantity: int = DEFAULT_ITEM_QUANTITY,
     ) -> Dict[str, Any]:
         category_result = category_result or self._normalize_category_result(
             channel_res.get("data", {}).get("categoryPredictResult", {})
@@ -590,7 +633,7 @@ class ItemPublisher:
         payload = {
             "freebies": False,
             "itemTypeStr": "b",
-            "quantity": "1",
+            "quantity": str(normalize_item_quantity(quantity)),
             "simpleItem": "true",
             "imageInfoDOList": [
                 {

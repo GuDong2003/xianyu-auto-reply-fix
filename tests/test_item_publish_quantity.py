@@ -1,14 +1,37 @@
 """发布载荷的单品库存回归：不再固定为 1，且可配置、可裁剪。"""
 
+import os
 import unittest
 from unittest import mock
 
 from utils.item_publisher import (
     DEFAULT_ITEM_QUANTITY,
+    DEFAULT_ITEM_QUANTITY_FALLBACK,
     MAX_ITEM_QUANTITY,
     ItemPublisher,
+    _parse_default_quantity,
     normalize_item_quantity,
 )
+
+
+class ParseDefaultQuantityTests(unittest.TestCase):
+    def test_reads_configured_value(self):
+        with mock.patch.dict(os.environ, {'PUBLISH_ITEM_QUANTITY': '120'}):
+            self.assertEqual(_parse_default_quantity(), 120)
+
+    def test_invalid_value_falls_back_instead_of_raising(self):
+        # 模块级 int(os.getenv(...)) 会在 import 阶段抛 ValueError，整个服务起不来。
+        for raw in ('abc', '', ' ', '8.5', '0', '-5'):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {'PUBLISH_ITEM_QUANTITY': raw}):
+                self.assertEqual(_parse_default_quantity(), DEFAULT_ITEM_QUANTITY_FALLBACK)
+
+    def test_clips_over_limit(self):
+        with mock.patch.dict(os.environ, {'PUBLISH_ITEM_QUANTITY': str(MAX_ITEM_QUANTITY + 100)}):
+            self.assertEqual(_parse_default_quantity(), MAX_ITEM_QUANTITY)
+
+    def test_missing_variable_uses_fallback(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_parse_default_quantity(), DEFAULT_ITEM_QUANTITY_FALLBACK)
 
 
 class NormalizeItemQuantityTests(unittest.TestCase):

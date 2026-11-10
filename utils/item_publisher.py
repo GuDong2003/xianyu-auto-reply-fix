@@ -18,8 +18,28 @@ from utils.product_sku import build_sku_payload_fields, normalize_sku_config
 # 一成交库存归零，平台随即把商品自动下架，卖家必须手动重新上架才能继续卖。
 # 卖虚拟资料的场景尤其明显（一份资料可以无限复制，库存 1 等于自己给自己限流）。
 # 这里改为可配置：环境变量 PUBLISH_ITEM_QUANTITY，缺省给足 800。
-DEFAULT_ITEM_QUANTITY = int(os.getenv("PUBLISH_ITEM_QUANTITY", "800") or 800)
+DEFAULT_ITEM_QUANTITY_FALLBACK = 800
 MAX_ITEM_QUANTITY = 9999
+
+
+def _parse_default_quantity() -> int:
+    """解析环境变量里的库存默认值。
+
+    模块级直接 `int(os.getenv(...))` 很危险：用户把环境变量写成 `abc` 或空串，
+    就会在 import 阶段抛 ValueError，整个服务起不来 —— 比原来的 bug 更严重。
+    所以这里任何解析失败都退回内置默认值。
+    """
+    raw = os.getenv("PUBLISH_ITEM_QUANTITY", "")
+    try:
+        quantity = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_ITEM_QUANTITY_FALLBACK
+    if quantity < 1:
+        return DEFAULT_ITEM_QUANTITY_FALLBACK
+    return min(quantity, MAX_ITEM_QUANTITY)
+
+
+DEFAULT_ITEM_QUANTITY = _parse_default_quantity()
 
 
 def normalize_item_quantity(value: Any) -> int:

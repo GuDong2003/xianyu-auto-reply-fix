@@ -5,6 +5,7 @@
 「订单详情获取成功」但状态永远 unknown。这里用回归测试把「不要手写」钉住。
 """
 
+import inspect
 import unittest
 
 from utils.order_detail_fetcher import OrderDetailFetcher
@@ -35,6 +36,18 @@ class OrderDetailFetcherHeadersTests(unittest.TestCase):
         for header in FORBIDDEN_HEADERS:
             with self.subTest(header=header):
                 self.assertNotIn(header, normalized)
+
+
+class BrowserLocaleTests(unittest.TestCase):
+    """清掉自定义头之后，语言只能靠 context 的 locale 保证。
+
+    不显式指定时，Docker / 英文系统上浏览器会发 en-US，平台返回英文页面，
+    下游按中文关键词匹配订单状态就全部落空 —— 又回到「状态永远 unknown」。
+    """
+
+    def test_browser_context_pins_chinese_locale(self):
+        source = inspect.getsource(OrderDetailFetcher.init_browser)
+        self.assertIn("locale='zh-CN'", source)
 
 
 if __name__ == '__main__':

@@ -195,6 +195,11 @@ class OrderDetailFetcher:
             # 创建浏览器上下文
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
+                # locale 必须显式给：清掉自定义头之后，accept-language 就完全由浏览器
+                # 决定，而 Docker / 英文系统里默认会是 en-US。平台返回英文页面时，
+                # 下游按中文关键词（待发货 / 等待买家收货…）匹配订单状态会全部落空，
+                # 于是又回到「详情获取成功但状态 unknown」。这里跟 UA 一起钉成中文环境。
+                locale='zh-CN',
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
             )
 

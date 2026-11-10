@@ -25,6 +25,8 @@ class ItemPublisher:
     )
     ALLOWED_DELIVERY_CHOICES = {"包邮", "按距离计费", "一口价", "无需邮寄"}
     CATEGORY_PATH_ERROR_CODE = "FAIL_BIZ_CHANNEL_CAT_ID_PATH_QUERY_ERROR"
+    # kgraph 推荐里承载类目的属性卡片，propertyName 形如「分类」「类目」「品类」。
+    CATEGORY_CARD_KEYWORDS = ("类目", "分类", "品类")
 
     def __init__(self, cookies_str: str, cookie_id: str = "", proxy_config: Optional[Dict[str, Any]] = None):
         cleaned_cookies = str(cookies_str or "").strip()
@@ -206,13 +208,118 @@ class ItemPublisher:
             "tbCatId": str(cls._first_present_value(category_result, "tbCatId", "tb_cat_id") or "").strip(),
         }
 
+    @staticmethod
+    def _category_name_of(value: Dict[str, Any]) -> str:
+        return str(
+            ItemPublisher._first_present_value(
+                value, "catName", "cat_name", "channelCatName", "channel_cat_name"
+            ) or ""
+        ).strip()
+
+    @classmethod
+    def _extract_category_from_card_list(cls, channel_res: Dict[str, Any]) -> Dict[str, str]:
+        """从推荐的属性卡片里取类目。
+
+        平台把类目挪到了 `data.cardList[].cardData`（`propertyName` 含「类目/
+        分类/品类」）的 `valuesList` 里，`categoryPredictResult` 只剩
+        `{"sugShow": "1"}`。只读后者会得到一个全空结果，报「自动识别类目
+        不完整」，看起来像识别失败，实际是取值位置变了。
+
+        选值优先级：`isClicked` → `isUserClick` → `score` 最大。
+        """
+        data = channel_res.get("data") if isinstance(channel_res, dict) else None
+        data = data if isinstance(data, dict) else {}
+
+        for card in data.get("cardList") or []:
+            if not isinstance(card, dict):
+                continue
+            card_data = card.get("cardData") or {}
+            property_name = str(card_data.get("propertyName") or "")
+            if not any(keyword in property_name for keyword in cls.CATEGORY_CARD_KEYWORDS):
+                continue
+
+            values = [
+                value
+                for value in (card_data.get("valuesList") or [])
+                if isinstance(value, dict) and (value.get("channelCatId") or value.get("catId"))
+            ]
+            if not values:
+                continue
+
+            selected = next(
+                (v for v in values if str(v.get("isClicked") or "").lower() in {"1", "true"}), None
+            )
+            if selected is None:
+                selected = next(
+                    (v for v in values if str(v.get("isUserClick") or "").lower() in {"1", "true"}), None
+                )
+            if selected is None:
+                def _score(value: Dict[str, Any]) -> float:
+                    try:
+                        return float(value.get("score") or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                selected = max(values, key=_score)
+
+            return cls._category_from_value(selected, values)
+
+        return {}
+
+    @classmethod
+    def _category_from_value(
+        cls,
+        value: Dict[str, Any],
+        siblings: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, str]:
+        """把候选值转成 `itemCatDTO` 的四项。
+
+        平台有时只给 `channelCatId` 不给 `catId`。`catId` 是同一批候选共用的
+        父级，缺了会被 `itemCatDTO` 的必填校验挡住，但可以从同批候选里回填。
+        """
+        raw_cat_id = str(cls._first_present_value(value, "catId", "cat_id") or "").strip()
+        channel_cat_id = str(
+            cls._first_present_value(value, "channelCatId", "channel_cat_id") or ""
+        ).strip()
+
+        if not raw_cat_id and siblings:
+            shared_cat_ids = [
+                str(cls._first_present_value(item, "catId", "cat_id") or "").strip()
+                for item in siblings
+                if isinstance(item, dict)
+            ]
+            shared_cat_ids = [cat_id for cat_id in shared_cat_ids if cat_id]
+            if shared_cat_ids:
+                # 父级 catId 在同一批候选里是共用的，取出现最多的那个。
+                raw_cat_id = max(set(shared_cat_ids), key=shared_cat_ids.count)
+
+        return {
+            "catId": raw_cat_id,
+            "catName": cls._category_name_of(value),
+            "channelCatId": channel_cat_id,
+            "tbCatId": str(cls._first_present_value(value, "tbCatId", "tb_cat_id") or "").strip(),
+        }
+
     @classmethod
     def _validate_category_recommendation(cls, channel_res: Dict[str, Any]) -> Dict[str, str]:
         data = channel_res.get("data") if isinstance(channel_res, dict) else None
         category_result = cls._normalize_category_result(
             data.get("categoryPredictResult", {}) if isinstance(data, dict) else {}
         )
-        missing_fields = [field for field, value in category_result.items() if not value]
+
+        # 老字段缺失时回退到属性卡片 —— 平台现在把类目放在 cardList 里。
+        if not all(category_result.get(field) for field in ("catId", "catName", "channelCatId")):
+            fallback = cls._extract_category_from_card_list(channel_res)
+            category_result = {
+                key: category_result.get(key) or fallback.get(key, "")
+                for key in ("catId", "catName", "channelCatId", "tbCatId")
+            }
+
+        # tbCatId 在属性卡片里可能本来就没有，不作为阻塞项。
+        missing_fields = [
+            field for field in ("catId", "catName", "channelCatId")
+            if not category_result.get(field)
+        ]
         if missing_fields:
             raise ValueError(
                 "自动识别类目不完整，缺少字段: "

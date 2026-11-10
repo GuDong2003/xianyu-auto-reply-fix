@@ -283,15 +283,18 @@ class ItemPublisher:
         ).strip()
 
         if not raw_cat_id and siblings:
-            shared_cat_ids = [
+            shared_cat_ids = {
                 str(cls._first_present_value(item, "catId", "cat_id") or "").strip()
                 for item in siblings
                 if isinstance(item, dict)
-            ]
-            shared_cat_ids = [cat_id for cat_id in shared_cat_ids if cat_id]
-            if shared_cat_ids:
-                # 父级 catId 在同一批候选里是共用的，取出现最多的那个。
-                raw_cat_id = max(set(shared_cat_ids), key=shared_cat_ids.count)
+            }
+            shared_cat_ids.discard("")
+            # 只在「所有候选的父级 catId 完全一致」时才回填。
+            # 出现多个不同 catId 说明这批候选不属于同一个父级，此时猜一个大概率
+            # 会与 channelCatId 的路径不匹配，平台回 FAIL_BIZ_CHANNEL_CAT_ID_PATH_QUERY_ERROR，
+            # 反而比明确报「类目不完整」更难排查。宁可让它落到下面的缺字段报错。
+            if len(shared_cat_ids) == 1:
+                raw_cat_id = shared_cat_ids.pop()
 
         return {
             "catId": raw_cat_id,

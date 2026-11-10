@@ -75,6 +75,21 @@ class CategoryFromCardListTests(unittest.TestCase):
         self.assertEqual(result['catId'], '50023914')
         self.assertEqual(result['channelCatId'], '202036301')
 
+    def test_does_not_guess_when_parent_cat_ids_conflict(self):
+        # 候选分属不同父级时不能猜：猜错会变成平台的类目路径查询失败，更难查。
+        channel_res = {
+            'data': {
+                'cardList': card_list([
+                    {'channelCatId': '1', 'catName': '服务', 'catId': '50023914'},
+                    {'channelCatId': '2', 'catName': '技能培训', 'catId': '50088888'},
+                    {'channelCatId': '202036301', 'catName': '电子资料', 'isClicked': '1'},
+                ]),
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, '自动识别类目不完整'):
+            ItemPublisher._validate_category_recommendation(channel_res)
+
     def test_ignores_cards_without_category_keyword(self):
         channel_res = {
             'data': {

@@ -7,33 +7,33 @@ True，否则平台会把 title 当成 desc 前缀，读回来标题变成「描
 import unittest
 from unittest import mock
 
-from utils.item_publisher import ItemPublisher, build_item_desc
+from utils.item_publisher import ItemPublisher
 
 
 class BuildItemDescTests(unittest.TestCase):
     def test_prepends_title_on_first_line(self):
-        self.assertEqual(build_item_desc('标题', '正文'), '标题\n\n正文')
+        self.assertEqual(ItemPublisher.build_item_desc('标题', '正文'), '标题\n\n正文')
 
     def test_is_idempotent(self):
-        once = build_item_desc('标题', '正文')
-        self.assertEqual(build_item_desc('标题', once), once)
+        once = ItemPublisher.build_item_desc('标题', '正文')
+        self.assertEqual(ItemPublisher.build_item_desc('标题', once), once)
 
     def test_missing_title_or_description(self):
-        self.assertEqual(build_item_desc('', '正文'), '正文')
-        self.assertEqual(build_item_desc('标题', ''), '标题')
-        self.assertEqual(build_item_desc('', ''), '')
+        self.assertEqual(ItemPublisher.build_item_desc('', '正文'), '正文')
+        self.assertEqual(ItemPublisher.build_item_desc('标题', ''), '标题')
+        self.assertEqual(ItemPublisher.build_item_desc('', ''), '')
 
     def test_strips_whitespace(self):
-        self.assertEqual(build_item_desc('  标题  ', '  正文  '), '标题\n\n正文')
+        self.assertEqual(ItemPublisher.build_item_desc('  标题  ', '  正文  '), '标题\n\n正文')
 
     def test_short_title_prefix_is_not_treated_as_present(self):
         # 用 startswith 判断会把「描述恰好以标题同字开头」误当成已包含标题，
         # 结果详情页第一行根本不是标题。
-        self.assertEqual(build_item_desc('AI', 'AI绘画教程合集'), 'AI\n\nAI绘画教程合集')
-        self.assertEqual(build_item_desc('英语', '英语四级资料包'), '英语\n\n英语四级资料包')
+        self.assertEqual(ItemPublisher.build_item_desc('AI', 'AI绘画教程合集'), 'AI\n\nAI绘画教程合集')
+        self.assertEqual(ItemPublisher.build_item_desc('英语', '英语四级资料包'), '英语\n\n英语四级资料包')
 
     def test_title_in_first_line_only_is_idempotent(self):
-        self.assertEqual(build_item_desc('AI', 'AI\n\n正文'), 'AI\n\n正文')
+        self.assertEqual(ItemPublisher.build_item_desc('AI', 'AI\n\n正文'), 'AI\n\n正文')
 
 
 class PublishPayloadTextTests(unittest.TestCase):

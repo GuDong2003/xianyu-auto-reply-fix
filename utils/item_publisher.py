@@ -653,9 +653,18 @@ class ItemPublisher:
                 for image in uploaded_images
             ],
             "itemTextDTO": {
-                "desc": description,
+                # 默认保留原描述；显式配置后才在正文首行添加标题。
+                "desc": (
+                    self.build_item_desc(title, description)
+                    if os.getenv("PUBLISH_PREPEND_TITLE", "").strip().lower() in {"1", "true", "yes", "on"}
+                    else description
+                ),
                 "title": title,
-                "titleDescSeparate": description != title,
+                # 恒为 True。为 False 时平台会把 title 当成 desc 的前缀，
+                # 读回来 title 会变成「描述前 30 字」——描述留空时
+                # publish_desc 会回退成 title，两者相等，旧写法
+                # `description != title` 正好落进这个分支。
+                "titleDescSeparate": True,
             },
             "itemLabelExtList": self._build_item_label_list(card_list),
             "itemPriceDTO": {},
@@ -952,6 +961,25 @@ class ItemPublisher:
         stem = os.path.splitext(os.path.basename(str(filename or "item")))[0] or "item"
         safe_stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem)
         return f"{safe_stem}.jpg"
+
+    @staticmethod
+    def build_item_desc(title: str, description: str) -> str:
+        """显式启用标题拼接时，将标题放在描述第一行。
+
+        幂等：description 第一行已经是 title 时不重复拼。注意必须按**整行相等**
+        判断，不能用 `startswith` —— 标题只有几个字时很容易被描述里的同字开头
+        误命中（title「AI」+ 描述「AI绘画教程合集」会被判成"已包含"而完全不拼）。
+        """
+        clean_title = str(title or "").strip()
+        clean_description = str(description or "").strip()
+        if not clean_title:
+            return clean_description
+        if not clean_description:
+            return clean_title
+        first_line = clean_description.split("\n", 1)[0].strip()
+        if first_line == clean_title:
+            return clean_description
+        return f"{clean_title}\n\n{clean_description}"
 
     @staticmethod
     def _build_unique_code() -> str:

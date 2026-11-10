@@ -26,6 +26,15 @@ class BuildItemDescTests(unittest.TestCase):
     def test_strips_whitespace(self):
         self.assertEqual(build_item_desc('  标题  ', '  正文  '), '标题\n\n正文')
 
+    def test_short_title_prefix_is_not_treated_as_present(self):
+        # 用 startswith 判断会把「描述恰好以标题同字开头」误当成已包含标题，
+        # 结果详情页第一行根本不是标题。
+        self.assertEqual(build_item_desc('AI', 'AI绘画教程合集'), 'AI\n\nAI绘画教程合集')
+        self.assertEqual(build_item_desc('英语', '英语四级资料包'), '英语\n\n英语四级资料包')
+
+    def test_title_in_first_line_only_is_idempotent(self):
+        self.assertEqual(build_item_desc('AI', 'AI\n\n正文'), 'AI\n\n正文')
+
 
 class PublishPayloadTextTests(unittest.TestCase):
     def make_publisher(self):

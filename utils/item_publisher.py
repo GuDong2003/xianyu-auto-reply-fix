@@ -22,7 +22,9 @@ def build_item_desc(title: str, description: str) -> str:
     - 详情页正文只渲染 `desc`，`title` 只出现在列表卡片和浏览器标签页；
     - 所以标题若不写在 desc 第一行，买家在详情页就看不见标题。
 
-    幂等：description 已经以 title 开头时不重复拼。
+    幂等：description 第一行已经是 title 时不重复拼。注意必须按**整行相等**
+    判断，不能用 `startswith` —— 标题只有几个字时很容易被描述里的同字开头
+    误命中（title「AI」+ 描述「AI绘画教程合集」会被判成"已包含"而完全不拼）。
     """
     clean_title = str(title or "").strip()
     clean_description = str(description or "").strip()
@@ -30,7 +32,8 @@ def build_item_desc(title: str, description: str) -> str:
         return clean_description
     if not clean_description:
         return clean_title
-    if clean_description.startswith(clean_title):
+    first_line = clean_description.split("\n", 1)[0].strip()
+    if first_line == clean_title:
         return clean_description
     return f"{clean_title}\n\n{clean_description}"
 

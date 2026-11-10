@@ -46,6 +46,22 @@ XY_OUTBOUND_IP_PROBE_URL=https://api.ipify.org?format=json
 
 Token 刷新触发滑块时，程序会在启动验证前检查近期硬拒绝、连续失败压力，以及 Token 请求和验证浏览器的出口 IP 是否一致。`XY_SLIDER_RISK_WINDOW` 是风险统计和冷却窗口（默认 `1800` 秒），`XY_SLIDER_RISK_FAILURE_THRESHOLD` 是窗口内无成功记录时暂停验证的失败次数（默认 `6`）。IP 探测失败会兼容放行；将 `XY_OUTBOUND_IP_PROBE_URL` 设为空可关闭出口 IP 对比。
 
+## 商品发布
+
+可通过环境变量设置发布行为，修改后重启服务：
+
+```bash
+# 单品默认库存：默认 800，允许 1 至 9999
+PUBLISH_ITEM_QUANTITY=800
+
+# 是否在描述首行添加标题：默认关闭
+PUBLISH_PREPEND_TITLE=0
+```
+
+`PUBLISH_ITEM_QUANTITY=1` 可恢复单件库存。非法值回落为 800，超过上限时裁剪为 9999；多规格组合库存仍沿用各组合的配置。
+
+`PUBLISH_PREPEND_TITLE` 设置为 `1`、`true`、`yes` 或 `on` 时启用标题拼接，已有相同标题首行时不会重复添加。未启用时保留用户填写的描述；描述留空时仍沿用原有的标题回退行为。标题始终按独立字段提交。
+
 ## 全局配置文件
 
 `global_config.yml` 包含详细的系统配置，支持：

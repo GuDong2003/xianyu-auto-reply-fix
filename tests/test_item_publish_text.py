@@ -4,6 +4,7 @@
 True，否则平台会把 title 当成 desc 前缀，读回来标题变成「描述前 30 字」。
 """
 
+import os
 import unittest
 from unittest import mock
 
@@ -59,9 +60,21 @@ class PublishPayloadTextTests(unittest.TestCase):
         )
 
     def test_desc_starts_with_title(self):
-        payload = self.build_payload('测试标题', '测试描述')
+        with mock.patch.dict(os.environ, {'PUBLISH_PREPEND_TITLE': '1'}):
+            payload = self.build_payload('测试标题', '测试描述')
         self.assertEqual(payload['itemTextDTO']['desc'], '测试标题\n\n测试描述')
         self.assertEqual(payload['itemTextDTO']['title'], '测试标题')
+
+    def test_default_preserves_description(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            payload = self.build_payload('测试标题', '测试描述')
+        self.assertEqual(payload['itemTextDTO']['desc'], '测试描述')
+        self.assertIs(payload['itemTextDTO']['titleDescSeparate'], True)
+
+    def test_disabled_flag_preserves_description(self):
+        with mock.patch.dict(os.environ, {'PUBLISH_PREPEND_TITLE': '0'}):
+            payload = self.build_payload('测试标题', '测试描述')
+        self.assertEqual(payload['itemTextDTO']['desc'], '测试描述')
 
     def test_desc_keeps_title_when_description_missing(self):
         # publish_item 的描述回退成标题时，两者相等，旧写法会让

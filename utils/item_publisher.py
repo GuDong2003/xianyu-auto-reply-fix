@@ -610,11 +610,12 @@ class ItemPublisher:
                 for image in uploaded_images
             ],
             "itemTextDTO": {
-                # 闲鱼没有独立「标题」输入框（编辑页只有「宝贝描述」一个
-                # contenteditable），详情页正文只渲染 desc，title 仅用于列表
-                # 卡片和浏览器标签页。所以标题必须写在描述第一行，否则买家
-                # 在详情页根本看不到标题。
-                "desc": self.build_item_desc(title, description),
+                # 默认保留原描述；显式配置后才在正文首行添加标题。
+                "desc": (
+                    self.build_item_desc(title, description)
+                    if os.getenv("PUBLISH_PREPEND_TITLE", "").strip().lower() in {"1", "true", "yes", "on"}
+                    else description
+                ),
                 "title": title,
                 # 恒为 True。为 False 时平台会把 title 当成 desc 的前缀，
                 # 读回来 title 会变成「描述前 30 字」——描述留空时
@@ -920,13 +921,7 @@ class ItemPublisher:
 
     @staticmethod
     def build_item_desc(title: str, description: str) -> str:
-        """拼出真正要写进 `itemTextDTO.desc` 的文本：**标题占第一行**。
-
-        背景（2026-10-24 实测，别改回去）：
-
-        - 闲鱼编辑页只有「宝贝描述」一个输入框，没有独立的标题框；
-        - 详情页正文只渲染 `desc`，`title` 只出现在列表卡片和浏览器标签页；
-        - 所以标题若不写在 desc 第一行，买家在详情页就看不见标题。
+        """显式启用标题拼接时，将标题放在描述第一行。
 
         幂等：description 第一行已经是 title 时不重复拼。注意必须按**整行相等**
         判断，不能用 `startswith` —— 标题只有几个字时很容易被描述里的同字开头

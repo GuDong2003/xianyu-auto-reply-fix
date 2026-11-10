@@ -133,6 +133,29 @@ class CategoryFromCardListTests(unittest.TestCase):
         self.assertEqual(result['catId'], '111')
         self.assertEqual(result['channelCatId'], '222')
 
+    def test_partial_legacy_does_not_mix_with_card_category(self):
+        channel_res = {'data': {
+            'categoryPredictResult': {'catId': '111', 'catName': '老类目', 'tbCatId': '333'},
+            'cardList': card_list([
+                {'catId': '50023914', 'channelCatId': '202036301', 'catName': '电子资料'},
+            ]),
+        }}
+        self.assertEqual(ItemPublisher._validate_category_recommendation(channel_res), {
+            'catId': '50023914', 'channelCatId': '202036301', 'catName': '电子资料', 'tbCatId': '',
+        })
+
+    def test_partial_legacy_cannot_hide_ambiguous_card_parent(self):
+        channel_res = {'data': {
+            'categoryPredictResult': {'catId': '111', 'catName': '老类目'},
+            'cardList': card_list([
+                {'catId': '50023914', 'channelCatId': '1', 'catName': '服务'},
+                {'catId': '50088888', 'channelCatId': '2', 'catName': '技能培训'},
+                {'channelCatId': '202036301', 'catName': '电子资料', 'isClicked': '1'},
+            ]),
+        }}
+        with self.assertRaisesRegex(ValueError, '自动识别类目不完整'):
+            ItemPublisher._validate_category_recommendation(channel_res)
+
     def test_raises_when_nothing_usable(self):
         with self.assertRaisesRegex(ValueError, '自动识别类目不完整'):
             ItemPublisher._validate_category_recommendation({'data': {}})

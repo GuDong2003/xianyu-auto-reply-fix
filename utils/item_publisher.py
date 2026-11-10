@@ -312,11 +312,8 @@ class ItemPublisher:
 
         # 老字段缺失时回退到属性卡片 —— 平台现在把类目放在 cardList 里。
         if not all(category_result.get(field) for field in ("catId", "catName", "channelCatId")):
-            fallback = cls._extract_category_from_card_list(channel_res)
-            category_result = {
-                key: category_result.get(key) or fallback.get(key, "")
-                for key in ("catId", "catName", "channelCatId", "tbCatId")
-            }
+            # 类目字段必须来自同一候选，不能把旧 catId 与新 channelCatId 拼成错误路径。
+            category_result = cls._extract_category_from_card_list(channel_res)
 
         # tbCatId 在属性卡片里可能本来就没有，不作为阻塞项。
         missing_fields = [

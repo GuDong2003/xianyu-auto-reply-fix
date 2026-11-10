@@ -166,17 +166,24 @@ def classify_order_history_range(
     utc_start: Optional[str] = None,
     utc_end_exclusive: Optional[str] = None,
 ) -> str:
-    if not utc_start or not utc_end_exclusive:
+    # 两个边界都可以单独使用：只给 utc_start 就按「早于起点」过滤，只给
+    # utc_end_exclusive 就按「晚于终点」过滤。原写法要求两个边界同时存在，
+    # 否则一律返回 'in_range'，等于过滤完全失效（只传起点时仍然拉全量）。
+    if not utc_start and not utc_end_exclusive:
         return 'in_range'
 
     anchor_dt = parse_db_timestamp(anchor_time) if anchor_time else None
-    start_dt = parse_db_timestamp(utc_start)
-    end_dt = parse_db_timestamp(utc_end_exclusive)
-    if not anchor_dt or not start_dt or not end_dt:
+    start_dt = parse_db_timestamp(utc_start) if utc_start else None
+    end_dt = parse_db_timestamp(utc_end_exclusive) if utc_end_exclusive else None
+    if not anchor_dt:
         return 'unknown'
-    if anchor_dt < start_dt:
+    if utc_start and not start_dt:
+        return 'unknown'
+    if utc_end_exclusive and not end_dt:
+        return 'unknown'
+    if start_dt and anchor_dt < start_dt:
         return 'before'
-    if anchor_dt >= end_dt:
+    if end_dt and anchor_dt >= end_dt:
         return 'after'
     return 'in_range'
 

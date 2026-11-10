@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import requests
+from loguru import logger
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
 
 
@@ -198,6 +199,7 @@ def _run_drissionpage_fallback(
     handler_factory: Optional[Callable[..., Any]] = None,
 ) -> SliderVerificationResult:
     """运行 DrissionPage 兜底引擎并返回严格判定结果。"""
+    handler = None
     try:
         if handler_factory is None:
             from utils.refresh_util import DrissionHandler
@@ -218,6 +220,15 @@ def _run_drissionpage_fallback(
             x5_cookies={},
             message=f"DrissionPage兜底引擎执行失败: {exc}",
         )
+    finally:
+        # 之前只 new 不 close：正常路径和异常路径都不会回收浏览器，残留的无头
+        # Chrome 会一直占着调试端口（现场见过 9222 上挂 20 多分钟），下一次
+        # DrissionPage 启动就连错端口报 "Handshake status 404"。
+        if handler is not None:
+            try:
+                handler.close()
+            except Exception as close_exc:
+                logger.debug(f"DrissionPage兜底引擎关闭异常: {close_exc}")
 
 
 def run_slider_strict(

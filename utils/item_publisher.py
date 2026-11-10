@@ -13,6 +13,28 @@ from utils.xianyu_utils import generate_sign, trans_cookies
 from utils.product_sku import build_sku_payload_fields, normalize_sku_config
 
 
+def build_item_desc(title: str, description: str) -> str:
+    """拼出真正要写进 `itemTextDTO.desc` 的文本：**标题占第一行**。
+
+    背景（2026-10-24 实测，别改回去）：
+
+    - 闲鱼编辑页只有「宝贝描述」一个输入框，没有独立的标题框；
+    - 详情页正文只渲染 `desc`，`title` 只出现在列表卡片和浏览器标签页；
+    - 所以标题若不写在 desc 第一行，买家在详情页就看不见标题。
+
+    幂等：description 已经以 title 开头时不重复拼。
+    """
+    clean_title = str(title or "").strip()
+    clean_description = str(description or "").strip()
+    if not clean_title:
+        return clean_description
+    if not clean_description:
+        return clean_title
+    if clean_description.startswith(clean_title):
+        return clean_description
+    return f"{clean_title}\n\n{clean_description}"
+
+
 class ItemPublisher:
     """闲鱼商品发布服务。"""
 
@@ -610,9 +632,17 @@ class ItemPublisher:
                 for image in uploaded_images
             ],
             "itemTextDTO": {
-                "desc": description,
+                # 闲鱼没有独立「标题」输入框（编辑页只有「宝贝描述」一个
+                # contenteditable），详情页正文只渲染 desc，title 仅用于列表
+                # 卡片和浏览器标签页。所以标题必须写在描述第一行，否则买家
+                # 在详情页根本看不到标题。
+                "desc": build_item_desc(title, description),
                 "title": title,
-                "titleDescSeparate": description != title,
+                # 恒为 True。为 False 时平台会把 title 当成 desc 的前缀，
+                # 读回来 title 会变成「描述前 30 字」——描述留空时
+                # publish_desc 会回退成 title，两者相等，旧写法
+                # `description != title` 正好落进这个分支。
+                "titleDescSeparate": True,
             },
             "itemLabelExtList": self._build_item_label_list(card_list),
             "itemPriceDTO": {},

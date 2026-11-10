@@ -210,6 +210,12 @@ docker compose up -d
 
 更多问题见 [常见问题](docs/faq.md)。
 
+## 🖥️ 第三方客户端
+
+[**掌柜台（zhangguitai）**](https://github.com/zhsj0089944/zhangguitai) · macOS 原生客户端（AppKit，非官方），由 [@zhsj0089944](https://github.com/zhsj0089944) 独立维护。
+
+支持 **macOS 14+ / Apple Silicon（arm64）**，需配合本项目后端使用。提供总览、订单、会话、账号和发货规则等管理界面，构建与使用说明见客户端仓库。
+
 ## 🧸 特别鸣谢
 
 ### 开源项目参考（排名不分先后）

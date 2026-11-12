@@ -91,6 +91,68 @@ security = HTTPBearer(auto_error=False)
 qr_check_locks = defaultdict(lambda: asyncio.Lock())
 qr_check_processed = {}  # 记录已处理的session: {session_id: {'processed': bool, 'timestamp': float}}
 
+# ========================= 会话列表限流 =========================
+# 平台 IM 的 `listNewestPagination` 是会被流控的接口（400600001）。
+# 会话页会频繁轮询（本项目自用客户端 30 秒一轮、总览页 90 秒），
+# 多客户端/多标签同时开时会成倍放大；一旦触发流控，继续按原节奏重试
+# 只会不断续上冷却期。
+#
+# 两层保护：
+#   ① 命中 400600001 后按店冷却，冷却期内返回缓存或本地缓存（指数退避 5→30 分钟）
+#   ② 20 秒短缓存，把「短窗口内重复查询」合并成一次平台请求
+#
+# ⚠️ 冷却与缓存都是**进程内**字典。本项目 Start.py 用 uvicorn 单进程起，
+# 直接可用；若改用 gunicorn 多 worker，每个 worker 各算各的，退避会变成 N 倍。
+CHAT_SESSION_REMOTE_COOLDOWN: Dict[str, float] = {}
+CHAT_SESSION_REMOTE_FAILURES: Dict[str, int] = {}
+CHAT_SESSION_REMOTE_COOLDOWN_SECONDS = 300
+CHAT_SESSION_REMOTE_CACHE: Dict[str, Any] = {}
+CHAT_SESSION_REMOTE_CACHE_TTL = 20.0   # 秒
+
+
+def _chat_session_cache_get(cookie_id: str, limit: int, cursor) -> Optional[Dict[str, Any]]:
+    """取远端会话缓存。只缓存「完整成功」的结果，失败/流控一律不缓存。"""
+    key = f'{cookie_id}|{limit}|{cursor}'
+    item = CHAT_SESSION_REMOTE_CACHE.get(key)
+    if not item:
+        return None
+    if time.time() - float(item.get('at') or 0) > CHAT_SESSION_REMOTE_CACHE_TTL:
+        CHAT_SESSION_REMOTE_CACHE.pop(key, None)
+        return None
+    payload = item.get('payload')
+    # 浅拷贝隔离：调用方后面会拿去做 enrich/backfill，虽然目前那些函数
+    # 都不原地改元素，但缓存不该依赖下游「不会写」这种隐式约定。
+    return dict(payload) if isinstance(payload, dict) else payload
+
+
+def _chat_session_cache_put(cookie_id: str, limit: int, cursor, payload: Dict[str, Any]) -> None:
+    """写入远端会话缓存；顺带清掉过期的，避免字典无限增长。"""
+    now_ts = time.time()
+    if len(CHAT_SESSION_REMOTE_CACHE) > 64:
+        for k in [k for k, v in CHAT_SESSION_REMOTE_CACHE.items()
+                  if now_ts - float(v.get('at') or 0) > CHAT_SESSION_REMOTE_CACHE_TTL]:
+            CHAT_SESSION_REMOTE_CACHE.pop(k, None)
+    CHAT_SESSION_REMOTE_CACHE[f'{cookie_id}|{limit}|{cursor}'] = {'at': now_ts, 'payload': payload}
+
+
+def _invalidate_chat_session_cache(cookie_id: str) -> None:
+    """会话发生变化时主动失效，保证「刚发完消息刷新就能看到」。"""
+    for key in [k for k in CHAT_SESSION_REMOTE_CACHE if k.startswith(f'{cookie_id}|')]:
+        CHAT_SESSION_REMOTE_CACHE.pop(key, None)
+
+
+def _cool_down_chat_remote(cookie_id: str) -> int:
+    """平台 IM 流控指数退避：5 → 10 → 20 → 30 分钟（上限 30）。"""
+    failures = CHAT_SESSION_REMOTE_FAILURES.get(cookie_id, 0) + 1
+    CHAT_SESSION_REMOTE_FAILURES[cookie_id] = failures
+    seconds = min(
+        CHAT_SESSION_REMOTE_COOLDOWN_SECONDS * (2 ** max(0, failures - 1)),
+        1800,
+    )
+    CHAT_SESSION_REMOTE_COOLDOWN[cookie_id] = time.time() + seconds
+    return seconds
+
+
 # ========================= 防暴力破解配置 =========================
 # IP 登录失败记录: {ip: {'attempts': int, 'first_attempt': float, 'last_attempt': float, 'blocked_until': float}}
 login_ip_tracker = {}
@@ -14294,36 +14356,132 @@ async def get_chat_sessions(
         next_cursor = None
         source = 'local_cache'
 
-        if remote:
+        cooldown_until = CHAT_SESSION_REMOTE_COOLDOWN.get(cookie_id, 0)
+        cooldown_remaining = max(0, int(cooldown_until - time.time()))
+        # 缓存读在冷却期也要试：缓存里带着 has_more / next_cursor，
+        # 冷却期直接想「干脆别读缓存」会让翻页请求拿到空列表，用户点加载更多没反应。
+        cached_page = _chat_session_cache_get(cookie_id, normalized_limit, cursor) if remote else None
+
+        if remote and cached_page is not None:
+            # 命中缓存：整段跳过平台请求，行为与一次真实成功完全一致。
+            # 冷却期也走这里 —— 缓存是上一次成功的结果，比空列表有用得多
+            # （翻页请求丢了 next_cursor 会让「加载更多」直接失灵）。
+            remote_sessions = cached_page.get('sessions') or []
+            source = cached_page.get('source') or 'remote_im'
+            has_more = bool(cached_page.get('has_more'))
+            next_cursor = cached_page.get('next_cursor')
+            logger.debug(
+                f"会话远端缓存命中: cookie_id={cookie_id}, limit={normalized_limit}, "
+                f"条数={len(remote_sessions)}"
+            )
+            if cooldown_remaining > 0:
+                remote_error = f'平台会话接口流控冷却中，约 {cooldown_remaining} 秒后自动重试'
+            else:
+                remote_error = None
+        elif remote and cooldown_remaining > 0:
+            remote_error = f'平台会话接口流控冷却中，约 {cooldown_remaining} 秒后自动重试'
+        elif remote:
             live_instance = _get_chat_live_instance(cookie_id)
             if live_instance:
                 owner_user_id = _clean_goofish_id(getattr(live_instance, 'myid', None))
-                try:
-                    body = await _run_live_instance_on_manager_loop(
-                        cookie_id,
-                        lambda: live_instance.list_newest_conversations(
-                            start_timestamp=cursor,
-                            limit=min(normalized_limit, 100),
-                        ),
-                        timeout=40,
-                    )
+                page_cursor = cursor
+                seen_chat_ids = set()
+                seen_cursors = set()
+                # 平台单页最多 100 条。客户端要 200 条时不能只取第一页再把
+                # has_more=true 丢掉，否则历史会话会静默缺失。
+                #
+                # 🔴 但必须设页数上限：`_run_live_instance_on_manager_loop` 单次超时 40 秒，
+                # 而 `list_newest_conversations` 内部对 400600001 还会自己重试 3 次，
+                # 无限翻页等于让一个前端请求能把事件循环拖几十分钟 —— 与限流目的相反。
+                # 前端实际只用 100/200，2~3 页足够，这里硬顶 4 页。
+                max_pages = max(1, min(4, (normalized_limit + 99) // 100 + 1))
+                for _page_no in range(max_pages):
+                    if len(remote_sessions) >= normalized_limit:
+                        break
+                    try:
+                        body = await _run_live_instance_on_manager_loop(
+                            cookie_id,
+                            lambda page_cursor=page_cursor: live_instance.list_newest_conversations(
+                                start_timestamp=page_cursor,
+                                limit=min(normalized_limit, 100),
+                            ),
+                            timeout=40,
+                        )
+                    except HTTPException as remote_exc:
+                        detail_text = str(remote_exc.detail)
+                        if '频繁' in detail_text or '400600001' in detail_text:
+                            _cool_down_chat_remote(cookie_id)
+                        if not remote_sessions:
+                            remote_error = detail_text
+                        else:
+                            remote_error = '会话只加载了一部分，请刷新重试'
+                            logger.warning(
+                                f"直连IM会话翻页中断: cookie_id={cookie_id}, "
+                                f"已取={len(remote_sessions)}, error={mask_sensitive_text(remote_exc)}"
+                            )
+                        break
+                    except Exception as remote_exc:
+                        if not remote_sessions:
+                            remote_error = safe_client_error('直连IM会话拉取失败，已使用本地缓存')
+                        else:
+                            remote_error = '会话只加载了一部分，请刷新重试'
+                        logger.warning(f"直连IM会话拉取失败: cookie_id={cookie_id}, error={mask_sensitive_text(remote_exc)}")
+                        break
+
                     if isinstance(body, dict) and (body.get('reason') or body.get('code')) and not body.get('userConvs'):
                         error_code = str(body.get('code') or '')
-                        remote_error = '请求过于频繁，请稍后再试' if error_code == '400600001' else (body.get('reason') or body.get('developerMessage') or error_code)
-                    else:
-                        for item in (body.get('userConvs', []) if isinstance(body, dict) else []):
-                            session = _normalize_remote_conversation_session(item, owner_user_id=owner_user_id)
-                            if session:
-                                remote_sessions.append(session)
-                        raw_has_more = body.get('hasMore') if isinstance(body, dict) else False
-                        has_more = raw_has_more if isinstance(raw_has_more, bool) else raw_has_more == 1
-                        next_cursor = body.get('nextCursor') if isinstance(body, dict) else None
-                        source = 'remote_im'
-                except HTTPException as remote_exc:
-                    remote_error = str(remote_exc.detail)
-                except Exception as remote_exc:
-                    remote_error = safe_client_error('直连IM会话拉取失败，已使用本地缓存')
-                    logger.warning(f"直连IM会话拉取失败: cookie_id={cookie_id}, error={mask_sensitive_text(remote_exc)}")
+                        if error_code == '400600001':
+                            cooldown_seconds = _cool_down_chat_remote(cookie_id)
+                            remote_error = (
+                                f'请求过于频繁，已暂停远端会话刷新 '
+                                f'{cooldown_seconds} 秒'
+                            )
+                        else:
+                            remote_error = body.get('reason') or body.get('developerMessage') or error_code
+                        break
+
+                    page_sessions = []
+                    for item in (body.get('userConvs', []) if isinstance(body, dict) else []):
+                        session = _normalize_remote_conversation_session(item, owner_user_id=owner_user_id)
+                        if not session:
+                            continue
+                        chat_id = str(session.get('chat_id') or '')
+                        if chat_id and chat_id not in seen_chat_ids:
+                            seen_chat_ids.add(chat_id)
+                            page_sessions.append(session)
+                    remote_sessions.extend(page_sessions)
+                    source = 'remote_im'
+                    remote_error = None
+                    CHAT_SESSION_REMOTE_COOLDOWN.pop(cookie_id, None)
+                    CHAT_SESSION_REMOTE_FAILURES.pop(cookie_id, None)
+
+                    raw_has_more = body.get('hasMore') if isinstance(body, dict) else False
+                    has_more = raw_has_more if isinstance(raw_has_more, bool) else raw_has_more == 1
+                    next_cursor = body.get('nextCursor') if isinstance(body, dict) else None
+                    if (
+                        not has_more
+                        or next_cursor in (None, '')
+                        or next_cursor == page_cursor
+                        or next_cursor in seen_cursors
+                        or not page_sessions
+                    ):
+                        break
+                    seen_cursors.add(next_cursor)
+                    page_cursor = next_cursor
+
+                # 只有在「真的拿到数据且没报错」时才缓存，失败/部分成功一律不缓存
+                if cursor is None and remote_sessions and source == 'remote_im' and not remote_error:
+                    _chat_session_cache_put(
+                        cookie_id,
+                        normalized_limit,
+                        cursor,
+                        {
+                            'sessions': remote_sessions,
+                            'source': source,
+                            'has_more': has_more,
+                            'next_cursor': next_cursor,
+                        },
+                    )
             else:
                 remote_error = '账号未连接，请先连接'
 
@@ -14721,6 +14879,12 @@ async def chat_send_message(
             self_send_dedup.mark(cookie_id, req.chat_id, str(myid), req.message)
         except Exception as e:
             logger.debug(f"客服 Web 发送后回显落库失败: {mask_sensitive_text(e)}")
+
+        # 刚发完消息，会话的 lastMessage 变了 → 立刻失效缓存，
+        # 否则下一次轮询（TTL 内）还会显示「最后一句是买家说的」。
+        # 用 `_ensure_cookie_access` 返回的 cookie_id，它已 strip；
+        # 直接拿 req.cookie_id 会在客户端传了空白字符时前缀对不上，缓存失效漏掉。
+        _invalidate_chat_session_cache(cookie_id)
 
         return {'success': True, 'message': '发送成功'}
     except HTTPException:

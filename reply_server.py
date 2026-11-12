@@ -14452,8 +14452,11 @@ async def get_chat_sessions(
                     remote_sessions.extend(page_sessions)
                     source = 'remote_im'
                     remote_error = None
-                    CHAT_SESSION_REMOTE_COOLDOWN.pop(cookie_id, None)
-                    CHAT_SESSION_REMOTE_FAILURES.pop(cookie_id, None)
+                    # ⚠️ 这里**不能**重置退避计数。翻页是一个多页请求，第一页成功
+                    # 不代表整个请求成功：如果第 2 页才 400600001，在这里 pop 掉
+                    # failures 会让「重试 → 第 1 页又成功 → 又 pop → 第 2 页又失败」
+                    # 每轮都从 5 分钟起步，10/20/30 分钟退避永远到不了。
+                    # 重置放到整个翻页循环成功之后（见循环结束处）。
 
                     raw_has_more = body.get('hasMore') if isinstance(body, dict) else False
                     has_more = raw_has_more if isinstance(raw_has_more, bool) else raw_has_more == 1
@@ -14484,6 +14487,10 @@ async def get_chat_sessions(
                             'next_cursor': next_cursor,
                         },
                     )
+                    # 整个翻页循环跑完且无报错，才认定「这一轮真的通了」→ 清零退避。
+                    # 放在循环内会让第 2 页的 400600001 把计数打回 1，退避永远 5 分钟起步。
+                    CHAT_SESSION_REMOTE_COOLDOWN.pop(cookie_id, None)
+                    CHAT_SESSION_REMOTE_FAILURES.pop(cookie_id, None)
             else:
                 remote_error = '账号未连接，请先连接'
 

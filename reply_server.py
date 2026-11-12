@@ -14403,7 +14403,8 @@ async def get_chat_sessions(
                             cookie_id,
                             lambda page_cursor=page_cursor: live_instance.list_newest_conversations(
                                 start_timestamp=page_cursor,
-                                limit=min(normalized_limit, 100),
+                                # 避免超取后截断结果，却跳过未返回的会话。
+                                limit=min(normalized_limit - len(remote_sessions), 100),
                             ),
                             timeout=40,
                         )

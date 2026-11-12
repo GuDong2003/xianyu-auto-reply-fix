@@ -6830,22 +6830,69 @@ class XianyuLive:
             if '=' not in cookie:
                 continue
             name, value = cookie.split(';')[0].split('=', 1)
+            # 这里**保留空值**：`name=` 表示服务端要求删除该 cookie，是有效指令，
+            # 不能在这一层就丢掉（否则真实的登出/撤销永远删不掉）。
+            # 哪些字段该保护、该怎么删，由 `_apply_response_cookie_updates` 决定。
             updates[name.strip()] = value.strip()
         return updates
 
     async def _apply_response_cookie_updates(self, response_headers, source: str) -> bool:
+        """把响应头里的 Set-Cookie 合并进当前 cookie 并落库。
+
+        ## 空值的两种语义必须分开（2026-11-12）
+
+        响应里的 `name=` 有两种来源，行为完全不同：
+
+        1. **会话字段被清空**（`_m_h5_tk=; Max-Age=0` 这类）—— 这类响应的本意是
+           「令牌过期，请重新取」，不是一个要执行的删除指令。如果我方照做，
+           一个**还能用**的 token 会被洗成空串；再叠加保活开头的
+           `_reload_latest_cookies_from_db()`，就变成「越保活越坏」的自洽坏循环。
+           所以 `PROTECTED_SESSION_COOKIE_FIELDS` 里的字段，空值一律不覆盖。
+        2. **服务端真的撤销某个 cookie**（`foo=; Max-Age=0`）—— 这是要执行的删除。
+           如果我方保留旧值，后续每个请求都在发一个服务端已明确作废的 cookie。
+
+        所以：空值 + 受保护字段 → 跳过；空值 + 普通字段 → 从 cookie 里删掉。
+        """
         updates = self._extract_set_cookie_updates(response_headers)
         if not updates:
             return False
 
         merged_cookies = dict(self.cookies)
-        merged_cookies.update(updates)
+        preserved, removed = [], []
+        for name, value in updates.items():
+            if value:
+                merged_cookies[name] = value
+            elif name in PROTECTED_SESSION_COOKIE_FIELDS:
+                preserved.append(name)
+            else:
+                # 服务端撤销 → 真的删掉，别继续发
+                merged_cookies.pop(name, None)
+                removed.append(name)
+
+        if preserved:
+            logger.info(
+                f"【{self.cookie_id}】响应试图清空受保护的会话字段，已忽略: "
+                f"{', '.join(preserved)} (source={source})"
+            )
+        if removed:
+            logger.info(
+                f"【{self.cookie_id}】服务端撤销了 {len(removed)} 个 cookie，已从本地移除: "
+                f"{', '.join(removed)} (source={source})"
+            )
+        if not any(updates.values()) and not removed:
+            # 全是受保护字段的空值 → 本次没有任何实际变更，不必写库
+            return False
+
         changed = await self._persist_runtime_cookie_state(
             cookies_dict=merged_cookies,
             source=source,
         )
         if changed:
-            logger.info(f"【{self.cookie_id}】已应用 {len(updates)} 个响应Cookie更新: source={source}")
+            applied = [n for n, v in updates.items() if v]
+            logger.info(
+                f"【{self.cookie_id}】已应用 {len(applied)} 个响应Cookie更新"
+                f"（另撤销 {len(removed)} 个）: source={source}"
+            )
         return changed
 
     def _build_websocket_headers(self) -> Dict[str, str]:
@@ -6858,10 +6905,23 @@ class XianyuLive:
         self.last_slider_success_cookie_length = len(cookies_str or "")
 
     def _build_cookie_string_with_updates(self, base_cookie_string: str = None, updated_cookies: Optional[Dict[str, Any]] = None) -> str:
+        """把响应里的 cookie 更新拼成一个**临时** cookie 串（不落库）。
+
+        空值同样要分流：受保护字段的空值不能写进去（写成 `_m_h5_tk=` 会让这次请求
+        带着空 token 出发），普通字段的空值则应当从串里删掉。
+        这条链路只给「token 预检的本次恢复」用，所以不用像 `_apply_response_cookie_updates`
+        那样记日志。
+        """
         merged_cookies = trans_cookies(base_cookie_string or self.cookies_str)
         for key, value in (updated_cookies or {}).items():
-            if key:
-                merged_cookies[str(key).strip()] = str(value)
+            name = str(key or '').strip()
+            if not name:
+                continue
+            text = str(value)
+            if text:
+                merged_cookies[name] = text
+            elif name not in PROTECTED_SESSION_COOKIE_FIELDS:
+                merged_cookies.pop(name, None)
         return self._serialize_cookies(merged_cookies)
 
     def _mark_pending_slider_success_notice(self, source: str = "token_refresh"):

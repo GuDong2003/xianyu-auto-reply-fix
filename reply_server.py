@@ -14469,8 +14469,10 @@ async def get_chat_sessions(
                     seen_cursors.add(next_cursor)
                     page_cursor = next_cursor
 
-                # 只有在「真的拿到数据且没报错」时才缓存，失败/部分成功一律不缓存
-                if cursor is None and remote_sessions and source == 'remote_im' and not remote_error:
+                # 只有在「真的拿到数据且没报错」时才缓存，失败/部分成功一律不缓存。
+                # 分页结果也按自己的 cursor 缓存：冷却期内点「加载更多」如果没有缓存，
+                # 只会拿到空列表 + has_more=False，按钮直接消失。
+                if remote_sessions and source == 'remote_im' and not remote_error:
                     _chat_session_cache_put(
                         cookie_id,
                         normalized_limit,

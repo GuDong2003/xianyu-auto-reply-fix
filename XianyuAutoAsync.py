@@ -6905,10 +6905,23 @@ class XianyuLive:
         self.last_slider_success_cookie_length = len(cookies_str or "")
 
     def _build_cookie_string_with_updates(self, base_cookie_string: str = None, updated_cookies: Optional[Dict[str, Any]] = None) -> str:
+        """把响应里的 cookie 更新拼成一个**临时** cookie 串（不落库）。
+
+        空值同样要分流：受保护字段的空值不能写进去（写成 `_m_h5_tk=` 会让这次请求
+        带着空 token 出发），普通字段的空值则应当从串里删掉。
+        这条链路只给「token 预检的本次恢复」用，所以不用像 `_apply_response_cookie_updates`
+        那样记日志。
+        """
         merged_cookies = trans_cookies(base_cookie_string or self.cookies_str)
         for key, value in (updated_cookies or {}).items():
-            if key:
-                merged_cookies[str(key).strip()] = str(value)
+            name = str(key or '').strip()
+            if not name:
+                continue
+            text = str(value)
+            if text:
+                merged_cookies[name] = text
+            elif name not in PROTECTED_SESSION_COOKIE_FIELDS:
+                merged_cookies.pop(name, None)
         return self._serialize_cookies(merged_cookies)
 
     def _mark_pending_slider_success_notice(self, source: str = "token_refresh"):

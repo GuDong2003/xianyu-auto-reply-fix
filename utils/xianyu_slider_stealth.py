@@ -2304,7 +2304,13 @@ class XianyuSliderStealth:
                     clicked = True
                     break
                 except Exception as selector_error:
-                    _mark_detached_runtime(selector_error)
+                    # `_mark_detached_runtime` 只是 `_detect_special_captcha_block` 里的
+                    # 局部闭包，本方法作用域里不存在。这里一调用就 NameError，
+                    # 被外层 `except Exception` 接住 → 整个候选选择器循环（含后面
+                    # slider_container 兜底）全部放弃，滑块错误态再也点不出来。
+                    logger.debug(
+                        f"【{self.pure_user_id}】滑块错误态选择器 {selector} 查询失败: {selector_error}"
+                    )
                     continue
 
             if not clicked and slider_container:
@@ -4735,7 +4741,11 @@ class XianyuSliderStealth:
                     if element and element.is_visible():
                         return True
                 except Exception as selector_error:
-                    _mark_detached_runtime(selector_error)
+                    # 同上：`_mark_detached_runtime` 在类方法作用域里不存在，
+                    # 抛 NameError 会把「找保持登录弹窗」整个搞挂。
+                    logger.debug(
+                        f"【{self.pure_user_id}】保持登录弹窗选择器 {selector} 查询失败: {selector_error}"
+                    )
                     continue
         except Exception:
             pass

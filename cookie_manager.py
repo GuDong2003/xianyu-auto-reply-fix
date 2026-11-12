@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from loguru import logger
 from db_manager import db_manager
 

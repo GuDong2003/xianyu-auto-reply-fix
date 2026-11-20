@@ -5477,7 +5477,7 @@ class XianyuSliderStealth:
 
         return False, None
 
-    def _page_has_slider(self, page) -> bool:
+    def _page_has_slider(self, page, log: bool = True) -> bool:
         if not page:
             return False
 
@@ -5502,7 +5502,8 @@ class XianyuSliderStealth:
                 try:
                     element = frame.query_selector(selector)
                     if element and element.is_visible():
-                        logger.info(f"【{self.pure_user_id}】检测到滑块元素: {selector}")
+                        if log:
+                            logger.info(f"【{self.pure_user_id}】检测到滑块元素: {selector}")
                         return True
                 except Exception:
                     continue
@@ -9520,7 +9521,30 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.error(f"【{self.pure_user_id}】点击失败提示区域时出错: {e}")
             return False
-    
+
+    def _manual_slider_passed(self) -> bool:
+        """人工滑块是否已通过：滑块从页面和所有 frame 中消失（或显示“验证通过”），且没有落到处罚/硬拒绝页。
+
+        不复用 check_verification_success_fast：滑块仍可见时它会退到
+        check_page_changed()，而那只看顶层页面的标题/URL。处罚滑块是叠在
+        goofish.com/im 上的 iframe，顶层本来就不像验证页，于是滑块一出现
+        几秒就被判成“人工滑块验证成功”，人根本来不及拖。
+        """
+        page = self.page
+        if self._page_has_slider(page, log=False):
+            shows_passed = False
+            for frame in [page] + list(page.frames):
+                try:
+                    container = frame.query_selector('.nc-container')
+                    if container and container.is_visible() and '验证通过' in (container.inner_text() or ''):
+                        shows_passed = True
+                        break
+                except Exception:
+                    continue
+            if not shows_passed:
+                return False
+        return self._detect_post_slider_blocking_state(page) is None
+
     def solve_slider(self, max_retries: int = 3, fast_mode: bool = False):
         """处理滑块验证（极速模式 + 自适应策略）。
 
@@ -9542,15 +9566,18 @@ class XianyuSliderStealth:
                 f"【{self.pure_user_id}】自动滑块已关闭，浏览器将保留"
                 f"{getattr(self, 'manual_slider_timeout', 180)}秒，请手动完成滑块验证"
             )
-            _, slider_button, _ = self.find_slider_elements(fast_mode=True)
+            # 记下滑块所在 frame，供处罚页/硬拒绝探测使用。
+            self.find_slider_elements(fast_mode=True)
             deadline = time.time() + getattr(self, 'manual_slider_timeout', 180)
+            passed_checks = 0
             while time.time() < deadline:
                 try:
                     if self.page is None or self.page.is_closed():
                         break
-                    if slider_button is None:
-                        _, slider_button, _ = self.find_slider_elements(fast_mode=True)
-                    elif self.check_verification_success_fast(slider_button):
+                    # 连续两次（约2秒）判定通过才算数：失败后“点击框体重试”会重载滑块，
+                    # 中间可能有一瞬间找不到滑块元素。
+                    passed_checks = passed_checks + 1 if self._manual_slider_passed() else 0
+                    if passed_checks >= 2:
                         self._manual_success_cookies = self._snapshot_context_cookies(
                             self.context,
                             page=self.page,
@@ -9559,6 +9586,7 @@ class XianyuSliderStealth:
                         logger.success(f"【{self.pure_user_id}】人工滑块验证成功")
                         return True
                 except Exception as manual_check_error:
+                    passed_checks = 0
                     logger.debug(
                         f"【{self.pure_user_id}】等待人工滑块结果: {manual_check_error}"
                     )

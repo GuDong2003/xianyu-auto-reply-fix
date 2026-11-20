@@ -63,7 +63,8 @@ class ManualSliderFallbackTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("出口 IP 不一致", reason)
 
-    def test_disabled_auto_slider_waits_for_manual_success_and_snapshots_cookies(self):
+    @patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    def test_disabled_auto_slider_waits_for_manual_success_and_snapshots_cookies(self, _sleep):
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.auto_slider_enabled = False
         slider.manual_slider_timeout = 30
@@ -72,7 +73,7 @@ class ManualSliderFallbackTest(unittest.TestCase):
         slider.page.is_closed.return_value = False
         slider.context = object()
         slider.find_slider_elements = MagicMock(return_value=(None, "slider-button", None))
-        slider.check_verification_success_fast = MagicMock(return_value=True)
+        slider._manual_slider_passed = MagicMock(return_value=True)
         slider._snapshot_context_cookies = MagicMock(return_value={"unb": "account-1"})
 
         self.assertTrue(slider.solve_slider())
@@ -127,6 +128,85 @@ class ManualSliderFallbackTest(unittest.TestCase):
 
         self.assertFalse(slider.solve_slider())
         self.assertIsNone(slider._manual_success_cookies)
+
+    @staticmethod
+    def _make_im_page_with_punish_slider(slider_text="请按住滑块，拖动到最右边"):
+        """goofish.com/im 上叠着处罚滑块 iframe；slider_text=None 表示滑块已消失。"""
+        page = MagicMock()
+        page.title.return_value = "聊天_闲鱼"
+        type(page).url = PropertyMock(return_value="https://www.goofish.com/im")
+        page.query_selector.return_value = None
+        page.content.return_value = "<html><body>聊天</body></html>"
+        frame = MagicMock()
+        frame.url = "https://passport.goofish.com/punish"
+        frame.content.return_value = f"<html><body>{slider_text or ''}</body></html>"
+        if slider_text is None:
+            frame.query_selector.return_value = None
+        else:
+            element = MagicMock()
+            element.is_visible.return_value = True
+            element.inner_text.return_value = slider_text
+            # 只有滑块相关元素存在，失败提示等其它选择器都查不到。
+            frame.query_selector.side_effect = lambda selector: (
+                element if selector in ("#nc_1_n1z", ".nc-container", ".nc_scale", ".nc-wrapper") else None
+            )
+        page.frames = [frame]
+        return page
+
+    @staticmethod
+    def _make_manual_slider(page):
+        slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
+        slider.auto_slider_enabled = False
+        slider.manual_slider_timeout = 30
+        slider.pure_user_id = "account-1"
+        slider.page = page
+        slider.context = object()
+        slider.find_slider_elements = MagicMock(return_value=(None, "slider-button", None))
+        slider._detect_post_slider_blocking_state = MagicMock(return_value=None)
+        slider._snapshot_context_cookies = MagicMock(return_value={"unb": "account-1"})
+        return slider
+
+    @patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    def test_manual_wait_keeps_waiting_while_punish_slider_is_over_im_page(self, _sleep):
+        # 顶层标题/URL 已经像登录后的页面，但 iframe 里的滑块还没人拖，不能判通过。
+        page = self._make_im_page_with_punish_slider()
+        page.is_closed.side_effect = [False, False, False, True]
+        slider = self._make_manual_slider(page)
+        # find_slider_elements 已被 mock，手动记下滑块所在 frame。
+        slider._detected_slider_frame = page.frames[0]
+
+        self.assertFalse(slider.solve_slider())
+        self.assertIsNone(slider._manual_success_cookies)
+
+    def test_manual_slider_passes_once_slider_is_gone(self):
+        slider = self._make_manual_slider(self._make_im_page_with_punish_slider(slider_text=None))
+
+        self.assertTrue(slider._manual_slider_passed())
+
+    def test_manual_slider_showing_pass_text_counts_as_passed(self):
+        slider = self._make_manual_slider(self._make_im_page_with_punish_slider("验证通过"))
+
+        self.assertTrue(slider._manual_slider_passed())
+
+    def test_manual_slider_gone_but_punish_page_left_is_not_passed(self):
+        slider = self._make_manual_slider(self._make_im_page_with_punish_slider(slider_text=None))
+        slider._detect_post_slider_blocking_state.return_value = {
+            "kind": "punish_captcha",
+            "message": "当前命中阿里验证码拦截处罚页（pureCaptcha），且页面不存在可操作滑块",
+        }
+
+        self.assertFalse(slider._manual_slider_passed())
+
+    @patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    def test_manual_wait_needs_two_passing_checks_in_a_row(self, _sleep):
+        # 失败后点击框体重试会重载滑块，单次找不到滑块不能算通过。
+        page = MagicMock()
+        page.is_closed.return_value = False
+        slider = self._make_manual_slider(page)
+        slider._manual_slider_passed = MagicMock(side_effect=[False, True, False, True, True])
+
+        self.assertTrue(slider.solve_slider())
+        self.assertEqual(slider._manual_slider_passed.call_count, 5)
 
     @patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
     def test_manual_run_without_slider_keeps_qr_detection_and_returns_immediately(self, _sleep):

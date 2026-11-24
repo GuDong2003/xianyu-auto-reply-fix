@@ -10053,7 +10053,28 @@ class XianyuSliderStealth:
 
         reason_suffix = f"（{reason}）" if reason else ""
         try:
-            process_tree = self._collect_process_tree(int(pid))
+            target_pid = int(pid)
+            if os.name == "nt":
+                logger.warning(
+                    f"【{self.pure_user_id}】开始兜底清理浏览器进程树{reason_suffix}: [{target_pid}]"
+                )
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(target_pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except Exception:
+                    try:
+                        os.kill(target_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                self._browser_pid = None
+                return True
+
+            process_tree = self._collect_process_tree(target_pid)
             if not process_tree:
                 return False
 
@@ -10061,7 +10082,12 @@ class XianyuSliderStealth:
                 f"【{self.pure_user_id}】开始兜底清理浏览器进程树{reason_suffix}: {process_tree}"
             )
 
-            for signal_name, sig in (("TERM", signal.SIGTERM), ("KILL", signal.SIGKILL)):
+            sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+            signals = (("TERM", signal.SIGTERM),) if sig_kill == signal.SIGTERM else (
+                ("TERM", signal.SIGTERM),
+                ("KILL", sig_kill),
+            )
+            for signal_name, sig in signals:
                 for proc_pid in process_tree:
                     try:
                         os.kill(proc_pid, sig)
@@ -12184,50 +12210,51 @@ class XianyuSliderStealth:
                     self.playwright = original_playwright
             
             finally:
-                # 关闭浏览器。这里不能无限阻塞，否则上层会话会一直卡在 processing。
+                # 关闭浏览器。必须在创建 Playwright 的同一线程内调用 close()/stop()，
+                # 否则会触发 greenlet "Cannot switch to a different thread"；
+                # 同时用看门狗 Timer 防止卡死，超时 8 秒直接强杀进程树。
+                close_watchdog = threading.Timer(
+                    8.0,
+                    self._force_kill_browser_process_tree,
+                    args=("password_login_close_timeout",),
+                )
+                close_watchdog.daemon = True
+                close_watchdog.start()
                 try:
                     close_errors = []
 
-                    def _close_runtime_resources():
+                    try:
+                        if context:
+                            context.close()
+                    except Exception as close_context_err:
+                        close_errors.append(f"context.close: {close_context_err}")
+
+                    if effective_clean_context and browser:
                         try:
-                            if context:
-                                context.close()
-                        except Exception as close_context_err:
-                            close_errors.append(f"context.close: {close_context_err}")
+                            browser.close()
+                        except Exception as close_browser_err:
+                            close_errors.append(f"browser.close: {close_browser_err}")
 
-                        if effective_clean_context and browser:
-                            try:
-                                browser.close()
-                            except Exception as close_browser_err:
-                                close_errors.append(f"browser.close: {close_browser_err}")
+                    try:
+                        if playwright:
+                            playwright.stop()
+                    except Exception as stop_playwright_err:
+                        close_errors.append(f"playwright.stop: {stop_playwright_err}")
 
-                        try:
-                            if playwright:
-                                playwright.stop()
-                        except Exception as stop_playwright_err:
-                            close_errors.append(f"playwright.stop: {stop_playwright_err}")
-
-                    close_thread = threading.Thread(
-                        target=_close_runtime_resources,
-                        name=f"pwd-login-close-{self.pure_user_id}",
-                        daemon=True,
-                    )
-                    close_thread.start()
-                    close_thread.join(timeout=8)
-
-                    if close_thread.is_alive():
-                        logger.warning(f"【{self.pure_user_id}】关闭浏览器超时，改为后台继续清理，避免阻塞密码登录会话收尾")
-                        self._force_kill_browser_process_tree("password_login_close_timeout")
-                    elif close_errors:
+                    if close_errors:
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器时出现异常: {close_errors}")
                         self._force_kill_browser_process_tree("password_login_close_error")
                     elif effective_clean_context:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，干净上下文已销毁")
+                        self._browser_pid = None
                     else:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
                         self._browser_pid = None
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
+                    self._force_kill_browser_process_tree("password_login_close_exception")
+                finally:
+                    close_watchdog.cancel()
 
                 # 释放并发槽位（防止槽位泄漏导致后续任务永远等待）
                 try:

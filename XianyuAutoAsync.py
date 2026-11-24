@@ -9,6 +9,7 @@ import random
 import secrets
 import socket
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
 from urllib.parse import parse_qs, urlparse
@@ -4819,6 +4820,18 @@ class XianyuLive:
             platform_completed_at=str(candidate.get('platform_completed_at') or '').strip() or None,
         )
 
+    @asynccontextmanager
+    async def _acquire_order_lock(self, lock_key: str, timeout: float = 45.0):
+        """带超时的订单锁上下文，避免前序任务异常阻塞导致后续发货永久死锁。"""
+        order_lock = self._order_locks[lock_key]
+        self._lock_usage_times[lock_key] = time.time()
+        await asyncio.wait_for(order_lock.acquire(), timeout=max(1.0, float(timeout)))
+        try:
+            yield
+        finally:
+            if order_lock.locked():
+                order_lock.release()
+
     async def _send_recovered_delivery_without_sid(
         self,
         order: Dict[str, Any],
@@ -4838,10 +4851,43 @@ class XianyuLive:
             logger.info(f"【{self.cookie_id}】{source} 订单延迟锁持有中，跳过补偿发货: {order_id}")
             return False
 
-        order_lock = self._order_locks[lock_key]
-        self._lock_usage_times[lock_key] = time.time()
+        try:
+            async with self._acquire_order_lock(lock_key, timeout=45.0):
+                return await self._send_recovered_delivery_without_sid_locked(
+                    order,
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=buyer_id,
+                    source=source,
+                    lock_key=lock_key,
+                )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"【{self.cookie_id}】{source} 获取订单锁超时(45s)，疑似前序发货任务阻塞: order_id={order_id}"
+            )
+            self._record_delivery_log(
+                order_id=order_id,
+                item_id=item_id,
+                buyer_id=buyer_id,
+                status='failed',
+                reason=f'{source} 获取订单锁超时，跳过本次补偿发货',
+                channel='auto',
+            )
+            return False
 
-        async with order_lock:
+    async def _send_recovered_delivery_without_sid_locked(
+        self,
+        order: Dict[str, Any],
+        *,
+        order_id: str,
+        item_id: str,
+        buyer_id: str,
+        source: str,
+        lock_key: str,
+    ) -> bool:
+        from db_manager import db_manager
+
+        if True:
             if self.is_lock_held(lock_key) or not self.can_auto_delivery(order_id):
                 logger.info(f"【{self.cookie_id}】{source} 获取锁后发现订单已处理，跳过补偿发货: {order_id}")
                 return False
@@ -5662,11 +5708,23 @@ class XianyuLive:
                 )
                 return
             
-            # 获取订单锁
-            order_lock = self._order_locks[lock_key]
-            self._lock_usage_times[lock_key] = time.time()
-            
-            async with order_lock:
+            # 获取订单锁（带超时保护，避免前序任务异常阻塞导致死锁）
+            try:
+                lock_ctx = self._acquire_order_lock(lock_key, timeout=45.0)
+                await lock_ctx.__aenter__()
+            except asyncio.TimeoutError:
+                logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 获取订单锁超时(45s)，疑似前序发货任务阻塞: {lock_key}')
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=user_id,
+                    status='failed',
+                    reason='获取订单锁超时，跳过本次自动发货',
+                    channel='auto'
+                )
+                return
+
+            try:
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 获取订单锁成功: {lock_key}')
                 
                 # 再次检查延迟锁和冷却状态
@@ -5951,6 +6009,8 @@ class XianyuLive:
                         chat_id=chat_id,
                         order_id=order_id
                     )
+            finally:
+                await lock_ctx.__aexit__(None, None, None)
 
         except Exception as e:
             self._release_data_reservation_if_needed(
@@ -6239,14 +6299,24 @@ class XianyuLive:
                 )
                 return
 
-            # 获取或创建该订单的锁
-            order_lock = self._order_locks[lock_key]
+            # 使用带超时的异步锁防止同一订单并发处理或死锁
+            try:
+                lock_ctx = self._acquire_order_lock(lock_key, timeout=45.0)
+                await lock_ctx.__aenter__()
+            except asyncio.TimeoutError:
+                logger.error(f'[{msg_time}] 【{self.cookie_id}】获取订单锁超时(45s)，疑似前序发货任务阻塞: {lock_key}')
+                self._record_delivery_log(
+                    order_id=order_id,
+                    item_id=item_id,
+                    buyer_id=send_user_id,
+                    buyer_nick=send_user_name,
+                    status='failed',
+                    reason='获取订单锁超时，跳过本次自动发货',
+                    channel='auto'
+                )
+                return
 
-            # 更新锁的使用时间
-            self._lock_usage_times[lock_key] = time.time()
-
-            # 使用异步锁防止同一订单的并发处理
-            async with order_lock:
+            try:
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】获取订单锁成功: {lock_key}，开始处理自动发货')
 
                 # 第三重检查：获取锁后再次检查延迟锁状态（双重检查，防止在等待锁期间状态发生变化）
@@ -6725,6 +6795,8 @@ class XianyuLive:
                     await self.send_delivery_failure_notification(send_user_name, send_user_id, item_id, f"自动发货处理异常: {str(e)}", chat_id, order_id=order_id)
 
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】订单锁释放: {lock_key}，自动发货处理完成')
+            finally:
+                await lock_ctx.__aexit__(None, None, None)
 
         except Exception as e:
             self._record_delivery_log(
@@ -15446,42 +15518,77 @@ class XianyuLive:
             logger.error(f"【{self.cookie_id}】单次发送发货步骤异常: {self._safe_str(e)}")
             raise
 
+    async def _await_create_chat_cid(self, websocket, toid, item_id, timeout: float = 30.0) -> Optional[str]:
+        """在临时 WebSocket 上初始化并创建会话，带严格的单次接收超时与注册失败快退。"""
+        await self.init(websocket)
+        await self.create_chat(websocket, toid, item_id)
+
+        deadline = time.monotonic() + max(1.0, float(timeout))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(f"【{self.cookie_id}】WebSocket消息等待超时")
+                return None
+
+            try:
+                raw_message = await asyncio.wait_for(websocket.recv(), timeout=remaining)
+            except asyncio.TimeoutError:
+                logger.warning(f"【{self.cookie_id}】WebSocket消息等待超时")
+                return None
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning(f"【{self.cookie_id}】WebSocket连接在等待会话ID时关闭")
+                return None
+
+            try:
+                logger.info(f"【{self.cookie_id}】message: {raw_message}")
+                parsed = json.loads(raw_message)
+            except Exception as e:
+                logger.warning(f"【{self.cookie_id}】处理消息异常: {self._safe_str(e)}")
+                continue
+
+            if not isinstance(parsed, dict):
+                continue
+
+            body = parsed.get("body")
+            if isinstance(body, dict):
+                conv = body.get("singleChatConversation")
+                if isinstance(conv, dict) and conv.get("cid"):
+                    return str(conv["cid"]).split("@")[0]
+
+            code = parsed.get("code")
+            if code is not None:
+                try:
+                    code_int = int(code)
+                except (TypeError, ValueError):
+                    code_int = 0
+                if code_int >= 400:
+                    scope = body.get("scope") if isinstance(body, dict) else ""
+                    reason = body.get("reason") if isinstance(body, dict) else ""
+                    err_code = body.get("code") if isinstance(body, dict) else ""
+                    if scope == "reg" or code_int == 401:
+                        logger.error(
+                            f"【{self.cookie_id}】临时WebSocket注册鉴权失败，立即中止: "
+                            f"http_code={code_int}, err_code={err_code}, reason={reason}"
+                        )
+                        return None
+
     async def _handle_websocket_connection_steps(self, websocket, toid, item_id, delivery_steps):
         """处理WebSocket连接的发货步骤发送逻辑。"""
         try:
-            await self.init(websocket)
-            await self.create_chat(websocket, toid, item_id)
+            cid = await self._await_create_chat_cid(websocket, toid, item_id, timeout=30.0)
+            if not cid:
+                logger.warning(f"【{self.cookie_id}】WebSocket连接关闭或超时，未能发送发货步骤")
+                return False
 
-            timeout = 30
-            start_time = time.time()
-
-            async for message in websocket:
-                try:
-                    if time.time() - start_time > timeout:
-                        logger.warning(f"【{self.cookie_id}】WebSocket消息等待超时")
-                        break
-
-                    logger.info(f"【{self.cookie_id}】message: {message}")
-                    message = json.loads(message)
-                    cid = message["body"]["singleChatConversation"]["cid"]
-                    cid = cid.split('@')[0]
-                    await self._send_delivery_steps(
-                        websocket,
-                        cid,
-                        toid,
-                        delivery_steps,
-                        log_prefix="单次手动发货"
-                    )
-                    logger.info(f'【{self.cookie_id}】send delivery steps success')
-                    return True
-                except KeyError:
-                    continue
-                except Exception as e:
-                    logger.warning(f"【{self.cookie_id}】处理消息异常: {self._safe_str(e)}")
-                    continue
-
-            logger.warning(f"【{self.cookie_id}】WebSocket连接关闭，未能发送发货步骤")
-            return False
+            await self._send_delivery_steps(
+                websocket,
+                cid,
+                toid,
+                delivery_steps,
+                log_prefix="单次手动发货"
+            )
+            logger.info(f'【{self.cookie_id}】send delivery steps success')
+            return True
         except Exception as e:
             logger.error(f"【{self.cookie_id}】WebSocket发货步骤处理异常: {self._safe_str(e)}")
             return False
@@ -15611,36 +15718,14 @@ class XianyuLive:
     async def _handle_websocket_connection(self, websocket, toid, item_id, text):
         """处理WebSocket连接的具体逻辑"""
         try:
-            await self.init(websocket)
-            await self.create_chat(websocket, toid, item_id)
+            cid = await self._await_create_chat_cid(websocket, toid, item_id, timeout=30.0)
+            if not cid:
+                logger.warning(f"【{self.cookie_id}】WebSocket连接关闭或超时，未能发送消息")
+                return False
 
-            # 添加超时处理，最多等待30秒
-            timeout = 30
-            start_time = time.time()
-
-            async for message in websocket:
-                try:
-                    # 检查是否超时
-                    if time.time() - start_time > timeout:
-                        logger.warning(f"【{self.cookie_id}】WebSocket消息等待超时")
-                        break
-
-                    logger.info(f"【{self.cookie_id}】message: {message}")
-                    message = json.loads(message)
-                    cid = message["body"]["singleChatConversation"]["cid"]
-                    cid = cid.split('@')[0]
-                    await self.send_msg(websocket, cid, toid, text)
-                    logger.info(f'【{self.cookie_id}】send message success')
-                    return True
-                except KeyError:
-                    # 消息格式不符合预期，继续等待
-                    continue
-                except Exception as e:
-                    logger.warning(f"【{self.cookie_id}】处理消息异常: {self._safe_str(e)}")
-                    continue
-
-            logger.warning(f"【{self.cookie_id}】WebSocket连接关闭，未能发送消息")
-            return False
+            await self.send_msg(websocket, cid, toid, text)
+            logger.info(f'【{self.cookie_id}】send message success')
+            return True
         except Exception as e:
             logger.error(f"【{self.cookie_id}】WebSocket连接处理异常: {self._safe_str(e)}")
             return False

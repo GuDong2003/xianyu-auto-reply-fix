@@ -10058,21 +10058,40 @@ class XianyuSliderStealth:
                 logger.warning(
                     f"【{self.pure_user_id}】开始兜底清理浏览器进程树{reason_suffix}: [{target_pid}]"
                 )
+                cleaned = False
                 try:
-                    subprocess.run(
+                    proc_res = subprocess.run(
                         ["taskkill", "/PID", str(target_pid), "/T", "/F"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=10,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
-                except Exception:
+                    if proc_res.returncode == 0:
+                        cleaned = True
+                    else:
+                        logger.warning(
+                            f"【{self.pure_user_id}】taskkill 清理进程树返回非零状态码 {proc_res.returncode}，尝试 SIGTERM 兜底: [{target_pid}]"
+                        )
+                except Exception as taskkill_err:
+                    logger.warning(
+                        f"【{self.pure_user_id}】taskkill 执行异常，尝试 SIGTERM 兜底: {taskkill_err}"
+                    )
+
+                if not cleaned:
                     try:
                         os.kill(target_pid, signal.SIGTERM)
+                        cleaned = True
                     except ProcessLookupError:
-                        pass
-                self._browser_pid = None
-                return True
+                        cleaned = True
+                    except Exception as term_err:
+                        logger.warning(
+                            f"【{self.pure_user_id}】SIGTERM 终止进程 {target_pid} 失败: {term_err}"
+                        )
+
+                if cleaned:
+                    self._browser_pid = None
+                return cleaned
 
             process_tree = self._collect_process_tree(target_pid)
             if not process_tree:

@@ -20,8 +20,9 @@ class WinPlaywrightCleanupTests(unittest.TestCase):
 
     def test_force_kill_browser_process_tree_uses_taskkill_on_windows(self):
         stub = self._make_stub()
+        proc_ok = mock.Mock(returncode=0)
         with mock.patch("utils.xianyu_slider_stealth.os.name", "nt"), \
-             mock.patch("utils.xianyu_slider_stealth.subprocess.run") as mock_run:
+             mock.patch("utils.xianyu_slider_stealth.subprocess.run", return_value=proc_ok) as mock_run:
             result = stub._force_kill_browser_process_tree("password_login_close_error")
 
         self.assertTrue(result)
@@ -29,6 +30,18 @@ class WinPlaywrightCleanupTests(unittest.TestCase):
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         self.assertEqual(cmd, ["taskkill", "/PID", "4242", "/T", "/F"])
+
+    def test_force_kill_browser_process_tree_windows_nonzero_falls_back_to_sigterm(self):
+        stub = self._make_stub()
+        proc_fail = mock.Mock(returncode=1)
+        with mock.patch("utils.xianyu_slider_stealth.os.name", "nt"), \
+             mock.patch("utils.xianyu_slider_stealth.subprocess.run", return_value=proc_fail), \
+             mock.patch("utils.xianyu_slider_stealth.os.kill", side_effect=PermissionError("denied")) as mock_kill:
+            result = stub._force_kill_browser_process_tree("password_login_close_error")
+
+        self.assertFalse(result)
+        self.assertEqual(stub._browser_pid, 4242)
+        mock_kill.assert_called_once_with(4242, signal.SIGTERM)
 
     def test_force_kill_browser_process_tree_posix_handles_missing_sigkill(self):
         stub = self._make_stub()

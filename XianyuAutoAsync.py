@@ -5106,7 +5106,7 @@ class XianyuLive:
         websocket = getattr(self, 'ws', None)
         chat_id = sid.replace('@goofish', '')
         if websocket and chat_id:
-            await self._handle_simple_message_auto_delivery(
+            return await self._handle_simple_message_auto_delivery(
                 websocket,
                 order_id,
                 item_id,
@@ -5115,7 +5115,6 @@ class XianyuLive:
                 time.strftime('%Y-%m-%d %H:%M:%S'),
                 source,
             )
-            return True
 
         logger.warning(
             f"【{self.cookie_id}】{source} 待发货订单缺少可用会话ID，尝试通过买家和商品建立会话补偿发货: "
@@ -5623,7 +5622,7 @@ class XianyuLive:
             return None
 
     async def _handle_simple_message_auto_delivery(self, websocket, order_id: str, item_id: str, 
-                                                    user_id: str, chat_id: str, msg_time: str, msg_id: str):
+                                                    user_id: str, chat_id: str, msg_time: str, msg_id: str) -> bool:
         """处理简化结构消息的自动发货逻辑
         
         专门用于处理简化结构的发货通知消息（message['1']是字符串的情况）
@@ -5638,6 +5637,7 @@ class XianyuLive:
             msg_time: 消息时间
             msg_id: 消息ID
         """
+        completed = False
         try:
             logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 🚀 开始处理简化消息自动发货: order_id={order_id}, item_id={item_id}')
             
@@ -5657,7 +5657,7 @@ class XianyuLive:
                             reason='商品不属于当前账号，跳过自动发货',
                             channel='auto'
                         )
-                        return
+                        return False
                     logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 商品 {item_id} 归属验证通过')
                 except Exception as e:
                     logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 检查商品归属失败: {self._safe_str(e)}，跳过自动发货')
@@ -5669,7 +5669,7 @@ class XianyuLive:
                         reason=f'检查商品归属失败: {self._safe_str(e)}',
                         channel='auto'
                     )
-                    return
+                    return False
             
             if self._check_buyer_blacklist_for_action(
                 buyer_id=user_id,
@@ -5679,7 +5679,7 @@ class XianyuLive:
                 channel='auto',
                 log_delivery=True,
             ):
-                return
+                return False
 
             # 检查订单是否已发货
             if not self.can_auto_delivery(order_id):
@@ -5692,7 +5692,7 @@ class XianyuLive:
                     reason='订单在冷却期内，跳过发货',
                     channel='auto'
                 )
-                return
+                return False
             
             # 检查延迟锁状态
             lock_key = order_id
@@ -5706,7 +5706,7 @@ class XianyuLive:
                     reason='订单延迟锁持有中，跳过发货',
                     channel='auto'
                 )
-                return
+                return False
             
             # 获取订单锁（带超时保护，避免前序任务异常阻塞导致死锁）
             try:
@@ -5722,7 +5722,7 @@ class XianyuLive:
                     reason='获取订单锁超时，跳过本次自动发货',
                     channel='auto'
                 )
-                return
+                return False
 
             try:
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 获取订单锁成功: {lock_key}')
@@ -5738,7 +5738,7 @@ class XianyuLive:
                         reason='获取锁后发现订单已处理，跳过发货',
                         channel='auto'
                     )
-                    return
+                    return False
 
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 📤 开始执行自动发货内容发送（发送成功后再确认发货）')
                 
@@ -5791,7 +5791,7 @@ class XianyuLive:
                             chat_id=chat_id,
                             order_id=order_id
                         )
-                        return
+                        return False
 
                     self._persist_delivery_finalization_state(
                         order_id=order_id,
@@ -5817,6 +5817,7 @@ class XianyuLive:
                         channel='auto',
                         rule_meta=pending_finalize_meta
                     )
+                    completed = True
                     await self.send_delivery_failure_notification(
                         send_user_name="买家",
                         send_user_id=user_id,
@@ -5826,7 +5827,7 @@ class XianyuLive:
                         order_id=order_id
                     )
                     logger.info(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] ✅ 简化消息自动发货补完成收尾成功')
-                    return
+                    return True
                 
                 # 调用自动发货方法获取发货内容
                 delivery_result = await self._auto_delivery(
@@ -5939,7 +5940,7 @@ class XianyuLive:
                                 chat_id=chat_id,
                                 order_id=order_id
                             )
-                            return
+                            return False
 
                         self._persist_delivery_finalization_state(
                             order_id=order_id,
@@ -5980,6 +5981,7 @@ class XianyuLive:
                         raise
                     
                     # 发送成功通知
+                    completed = True
                     await self.send_delivery_failure_notification(
                         send_user_name="买家",
                         send_user_id=user_id,
@@ -6013,6 +6015,9 @@ class XianyuLive:
                 await lock_ctx.__aexit__(None, None, None)
 
         except Exception as e:
+            if completed:
+                logger.warning(f'[{msg_time}] 【{self.cookie_id}】发货已完成，但收尾通知失败: {self._safe_str(e)}')
+                return True
             self._release_data_reservation_if_needed(
                 delivery_result if 'delivery_result' in locals() and isinstance(delivery_result, dict) else delivery_rule_meta if 'delivery_rule_meta' in locals() else None,
                 error=f'自动发货发送失败: {self._safe_str(e)}'
@@ -6028,6 +6033,8 @@ class XianyuLive:
             logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 简化消息自动发货异常: {self._safe_str(e)}')
             import traceback
             logger.error(f'[{msg_time}] 【{self.cookie_id}】[{msg_id}] 异常堆栈: {traceback.format_exc()}')
+
+        return completed
 
     async def _handle_auto_delivery(self, websocket, message: dict, send_user_name: str, send_user_id: str,
                                    item_id: str, chat_id: str, msg_time: str, message_data: dict = None):
@@ -15519,58 +15526,63 @@ class XianyuLive:
             raise
 
     async def _await_create_chat_cid(self, websocket, toid, item_id, timeout: float = 30.0) -> Optional[str]:
-        """在临时 WebSocket 上初始化并创建会话，带严格的单次接收超时与注册失败快退。"""
-        await self.init(websocket)
-        await self.create_chat(websocket, toid, item_id)
+        """在同一个时限内完成临时连接初始化、会话创建及会话 ID 等待。"""
+        phase = "初始化"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(1.0, float(timeout))
+        try:
+            # 只限制发送发货内容之前的阶段；不把传输结果未知的发货当作可重试的初始化失败。
+            async with asyncio.timeout_at(deadline):
+                await self.init(websocket)
+                phase = "创建会话"
+                await self.create_chat(websocket, toid, item_id)
+                phase = "等待会话ID"
+                while True:
+                    # 缓冲区有待处理帧时 recv() 可能立即返回，不能只依赖定时器获得执行机会。
+                    if loop.time() >= deadline:
+                        raise asyncio.TimeoutError
+                    raw_message = await websocket.recv()
+                    if loop.time() >= deadline:
+                        raise asyncio.TimeoutError
 
-        deadline = time.monotonic() + max(1.0, float(timeout))
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                logger.warning(f"【{self.cookie_id}】WebSocket消息等待超时")
-                return None
+                    try:
+                        logger.info(f"【{self.cookie_id}】message: {raw_message}")
+                        parsed = json.loads(raw_message)
+                    except Exception as e:
+                        logger.warning(f"【{self.cookie_id}】处理消息异常: {self._safe_str(e)}")
+                        continue
 
-            try:
-                raw_message = await asyncio.wait_for(websocket.recv(), timeout=remaining)
-            except asyncio.TimeoutError:
-                logger.warning(f"【{self.cookie_id}】WebSocket消息等待超时")
-                return None
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning(f"【{self.cookie_id}】WebSocket连接在等待会话ID时关闭")
-                return None
+                    if not isinstance(parsed, dict):
+                        continue
 
-            try:
-                logger.info(f"【{self.cookie_id}】message: {raw_message}")
-                parsed = json.loads(raw_message)
-            except Exception as e:
-                logger.warning(f"【{self.cookie_id}】处理消息异常: {self._safe_str(e)}")
-                continue
+                    body = parsed.get("body")
+                    if isinstance(body, dict):
+                        conv = body.get("singleChatConversation")
+                        if isinstance(conv, dict) and conv.get("cid"):
+                            return str(conv["cid"]).split("@")[0]
 
-            if not isinstance(parsed, dict):
-                continue
-
-            body = parsed.get("body")
-            if isinstance(body, dict):
-                conv = body.get("singleChatConversation")
-                if isinstance(conv, dict) and conv.get("cid"):
-                    return str(conv["cid"]).split("@")[0]
-
-            code = parsed.get("code")
-            if code is not None:
-                try:
-                    code_int = int(code)
-                except (TypeError, ValueError):
-                    code_int = 0
-                if code_int >= 400:
-                    scope = body.get("scope") if isinstance(body, dict) else ""
-                    reason = body.get("reason") if isinstance(body, dict) else ""
-                    err_code = body.get("code") if isinstance(body, dict) else ""
-                    if scope == "reg" or code_int == 401:
-                        logger.error(
-                            f"【{self.cookie_id}】临时WebSocket注册鉴权失败，立即中止: "
-                            f"http_code={code_int}, err_code={err_code}, reason={reason}"
-                        )
-                        return None
+                    code = parsed.get("code")
+                    if code is not None:
+                        try:
+                            code_int = int(code)
+                        except (TypeError, ValueError):
+                            code_int = 0
+                        if code_int >= 400:
+                            scope = body.get("scope") if isinstance(body, dict) else ""
+                            reason = body.get("reason") if isinstance(body, dict) else ""
+                            err_code = body.get("code") if isinstance(body, dict) else ""
+                            if scope == "reg" or code_int == 401:
+                                logger.error(
+                                    f"【{self.cookie_id}】临时WebSocket注册鉴权失败，立即中止: "
+                                    f"http_code={code_int}, err_code={err_code}, reason={reason}"
+                                )
+                                return None
+        except asyncio.TimeoutError:
+            logger.warning(f"【{self.cookie_id}】临时WebSocket{phase}超时")
+            return None
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"【{self.cookie_id}】临时WebSocket在{phase}时关闭")
+            return None
 
     async def _handle_websocket_connection_steps(self, websocket, toid, item_id, delivery_steps):
         """处理WebSocket连接的发货步骤发送逻辑。"""

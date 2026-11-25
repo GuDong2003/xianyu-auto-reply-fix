@@ -10045,6 +10045,81 @@ class XianyuSliderStealth:
             to_visit.extend(parent_map.get(pid, []))
         return ordered
 
+    def _fallback_kill_windows_process_tree(self, target_pid: int) -> bool:
+        """Windows 下 taskkill 失败时的进程树感知兜底清理，仅确认无残留后返回 True。"""
+        try:
+            import psutil
+        except ImportError:
+            try:
+                os.kill(target_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return True
+            except Exception as term_err:
+                logger.warning(
+                    f"【{self.pure_user_id}】SIGTERM 终止进程 {target_pid} 失败: {term_err}"
+                )
+            logger.warning(
+                f"【{self.pure_user_id}】缺少 psutil，无法确认 {target_pid} 子孙进程是否已全部退出"
+            )
+            return False
+
+        try:
+            root = psutil.Process(target_pid)
+        except psutil.NoSuchProcess:
+            return True
+        except Exception as err:
+            logger.warning(
+                f"【{self.pure_user_id}】获取进程 {target_pid} 信息失败: {err}"
+            )
+            return False
+
+        try:
+            children = root.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return True
+        except Exception as err:
+            logger.warning(
+                f"【{self.pure_user_id}】枚举进程 {target_pid} 子进程失败: {err}"
+            )
+            try:
+                root.terminate()
+            except Exception:
+                pass
+            return False
+
+        targets = list(reversed(children)) + [root]
+        for proc in targets:
+            try:
+                proc.terminate()
+            except psutil.NoSuchProcess:
+                continue
+            except Exception as err:
+                logger.warning(
+                    f"【{self.pure_user_id}】终止进程 {proc.pid} 失败: {err}"
+                )
+
+        _, alive = psutil.wait_procs(targets, timeout=1.0)
+        if alive:
+            for proc in alive:
+                try:
+                    proc.kill()
+                except psutil.NoSuchProcess:
+                    continue
+                except Exception as err:
+                    logger.warning(
+                        f"【{self.pure_user_id}】强杀残留进程 {proc.pid} 失败: {err}"
+                    )
+            _, alive = psutil.wait_procs(alive, timeout=0.5)
+
+        if alive:
+            alive_pids = [proc.pid for proc in alive]
+            logger.warning(
+                f"【{self.pure_user_id}】Windows 进程树回退清理后仍有残留进程: {alive_pids}"
+            )
+            return False
+
+        return True
+
     def _force_kill_browser_process_tree(self, reason: str = "") -> bool:
         """兜底终止浏览器进程树，用于 close 失败或页面崩溃后的残留清理。"""
         pid = self._browser_pid
@@ -10071,23 +10146,15 @@ class XianyuSliderStealth:
                         cleaned = True
                     else:
                         logger.warning(
-                            f"【{self.pure_user_id}】taskkill 清理进程树返回非零状态码 {proc_res.returncode}，尝试 SIGTERM 兜底: [{target_pid}]"
+                            f"【{self.pure_user_id}】taskkill 清理进程树返回非零状态码 {proc_res.returncode}，尝试进程树回退清理: [{target_pid}]"
                         )
                 except Exception as taskkill_err:
                     logger.warning(
-                        f"【{self.pure_user_id}】taskkill 执行异常，尝试 SIGTERM 兜底: {taskkill_err}"
+                        f"【{self.pure_user_id}】taskkill 执行异常，尝试进程树回退清理: {taskkill_err}"
                     )
 
                 if not cleaned:
-                    try:
-                        os.kill(target_pid, signal.SIGTERM)
-                        cleaned = True
-                    except ProcessLookupError:
-                        cleaned = True
-                    except Exception as term_err:
-                        logger.warning(
-                            f"【{self.pure_user_id}】SIGTERM 终止进程 {target_pid} 失败: {term_err}"
-                        )
+                    cleaned = self._fallback_kill_windows_process_tree(target_pid)
 
                 if cleaned:
                     self._browser_pid = None

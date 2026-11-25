@@ -4,7 +4,9 @@ import ast
 import inspect
 import os
 import signal
+import sys
 import textwrap
+import types
 import unittest
 from unittest import mock
 
@@ -31,17 +33,84 @@ class WinPlaywrightCleanupTests(unittest.TestCase):
         cmd = mock_run.call_args[0][0]
         self.assertEqual(cmd, ["taskkill", "/PID", "4242", "/T", "/F"])
 
-    def test_force_kill_browser_process_tree_windows_nonzero_falls_back_to_sigterm(self):
+    def _make_fake_psutil(self, root_proc, wait_procs_impl):
+        class FakeNoSuchProcess(Exception):
+            pass
+
+        fake_psutil = types.SimpleNamespace(
+            NoSuchProcess=FakeNoSuchProcess,
+            Process=mock.Mock(return_value=root_proc),
+            wait_procs=mock.Mock(side_effect=wait_procs_impl)
+            if callable(wait_procs_impl) or isinstance(wait_procs_impl, list)
+            else mock.Mock(return_value=wait_procs_impl),
+        )
+        return fake_psutil
+
+    def test_force_kill_browser_process_tree_windows_nonzero_kills_descendants_and_clears_pid(self):
         stub = self._make_stub()
         proc_fail = mock.Mock(returncode=1)
+        child_1 = mock.Mock(pid=5001)
+        child_2 = mock.Mock(pid=5002)
+        root_proc = mock.Mock(pid=4242)
+        root_proc.children.return_value = [child_1, child_2]
+
+        terminate_order = []
+        child_1.terminate.side_effect = lambda: terminate_order.append(5001)
+        child_2.terminate.side_effect = lambda: terminate_order.append(5002)
+        root_proc.terminate.side_effect = lambda: terminate_order.append(4242)
+
+        fake_psutil = self._make_fake_psutil(root_proc, ([child_2, child_1, root_proc], []))
         with mock.patch("utils.xianyu_slider_stealth.os.name", "nt"), \
              mock.patch("utils.xianyu_slider_stealth.subprocess.run", return_value=proc_fail), \
-             mock.patch("utils.xianyu_slider_stealth.os.kill", side_effect=PermissionError("denied")) as mock_kill:
+             mock.patch.dict(sys.modules, {"psutil": fake_psutil}):
+            result = stub._force_kill_browser_process_tree("password_login_close_error")
+
+        self.assertTrue(result)
+        self.assertIsNone(stub._browser_pid)
+        self.assertEqual(terminate_order, [5002, 5001, 4242])
+
+    def test_force_kill_browser_process_tree_windows_nonzero_keeps_pid_when_descendant_alive(self):
+        stub = self._make_stub()
+        proc_fail = mock.Mock(returncode=1)
+        child_alive = mock.Mock(pid=5001)
+        child_alive.kill.side_effect = PermissionError("denied")
+        root_proc = mock.Mock(pid=4242)
+        root_proc.children.return_value = [child_alive]
+
+        fake_psutil = self._make_fake_psutil(
+            root_proc,
+            [([root_proc], [child_alive]), ([], [child_alive])],
+        )
+        with mock.patch("utils.xianyu_slider_stealth.os.name", "nt"), \
+             mock.patch("utils.xianyu_slider_stealth.subprocess.run", return_value=proc_fail), \
+             mock.patch.dict(sys.modules, {"psutil": fake_psutil}):
             result = stub._force_kill_browser_process_tree("password_login_close_error")
 
         self.assertFalse(result)
         self.assertEqual(stub._browser_pid, 4242)
-        mock_kill.assert_called_once_with(4242, signal.SIGTERM)
+        child_alive.terminate.assert_called_once()
+        child_alive.kill.assert_called_once()
+
+    def test_force_kill_browser_process_tree_windows_nonzero_escalates_to_kill(self):
+        stub = self._make_stub()
+        proc_fail = mock.Mock(returncode=1)
+        child_proc = mock.Mock(pid=5001)
+        root_proc = mock.Mock(pid=4242)
+        root_proc.children.return_value = [child_proc]
+
+        fake_psutil = self._make_fake_psutil(
+            root_proc,
+            [([root_proc], [child_proc]), ([child_proc], [])],
+        )
+        with mock.patch("utils.xianyu_slider_stealth.os.name", "nt"), \
+             mock.patch("utils.xianyu_slider_stealth.subprocess.run", return_value=proc_fail), \
+             mock.patch.dict(sys.modules, {"psutil": fake_psutil}):
+            result = stub._force_kill_browser_process_tree("password_login_close_error")
+
+        self.assertTrue(result)
+        self.assertIsNone(stub._browser_pid)
+        child_proc.terminate.assert_called_once()
+        child_proc.kill.assert_called_once()
 
     def test_force_kill_browser_process_tree_posix_handles_missing_sigkill(self):
         stub = self._make_stub()

@@ -20,20 +20,35 @@ import re
 import sys
 import socket
 import signal
+import asyncio
+from collections import defaultdict
+from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional, Tuple, List, Dict, Any, Callable
 from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
+
+from loguru import logger
+from playwright.async_api import async_playwright
 from playwright.sync_api import sync_playwright as playwright_sync_playwright, ElementHandle
+
 try:
     from patchright.sync_api import sync_playwright as patchright_sync_playwright
 except ImportError:
     patchright_sync_playwright = None
-from playwright.async_api import async_playwright
-import asyncio
-from typing import Optional, Tuple, List, Dict, Any, Callable
-from loguru import logger
-from collections import defaultdict
+
+from utils.playwright_cleanup import PlaywrightProcessTree
 
 _PLAYWRIGHT_BROWSER_INSTALL_LOCK = threading.Lock()
+_PASSWORD_LOGIN_CLOSE_TIMEOUT = 8.0
+
+
+@dataclass
+class _PasswordLoginRuntime:
+    playwright: Any = None
+    context: Any = None
+    browser: Any = None
+    process_tree: Optional[PlaywrightProcessTree] = None
 
 
 # ============================================================================
@@ -1064,6 +1079,7 @@ class XianyuSliderStealth:
         self.playwright = None
         self._playwright_thread_id: Optional[int] = None
         self._browser_pid: Optional[int] = None
+        self._windows_browser_process_tree: Optional[PlaywrightProcessTree] = None
         # 内层 _detect_qr_code_verification 滑块自救成功后的兜底回流标记，由 run() 入口重置
         self._post_recovery_success: bool = False
         self._post_recovery_cookies = None
@@ -2400,7 +2416,7 @@ class XianyuSliderStealth:
                     )
                     launched_with_persistent_profile = True
                     self.browser = None
-                    self._browser_pid = self._extract_browser_pid(self.context)
+                    self._remember_browser_process(self.context)
                 except Exception as persistent_launch_error:
                     if not self._is_profile_in_use_launch_error(persistent_launch_error):
                         raise
@@ -2417,6 +2433,7 @@ class XianyuSliderStealth:
                             )
                             launched_with_persistent_profile = True
                             self.browser = None
+                            self._remember_browser_process(self.context)
                         except Exception as retry_launch_error:
                             if not self._is_profile_in_use_launch_error(retry_launch_error):
                                 raise
@@ -2433,7 +2450,7 @@ class XianyuSliderStealth:
             if not launched_with_persistent_profile:
                 try:
                     self.browser = self.playwright.chromium.launch(**launch_options)
-                    self._browser_pid = self._extract_browser_pid(self.browser)
+                    self._remember_browser_process(self.browser)
                 except Exception as launch_error:
                     if self.headless and (launch_options.get("executable_path") or launch_options.get("channel")):
                         fallback_options = dict(launch_options)
@@ -2443,7 +2460,7 @@ class XianyuSliderStealth:
                             f"【{self.pure_user_id}】指定浏览器无头启动失败，回退到 Playwright Chromium: {launch_error}"
                         )
                         self.browser = self.playwright.chromium.launch(**fallback_options)
-                        self._browser_pid = self._extract_browser_pid(self.browser)
+                        self._remember_browser_process(self.browser)
                     else:
                         raise
             
@@ -2494,6 +2511,7 @@ class XianyuSliderStealth:
     
     def _cleanup_on_init_failure(self):
         """初始化失败时的清理"""
+        self._get_windows_browser_process_tree(snapshot=True)
         try:
             if hasattr(self, 'page') and self.page:
                 self.page.close()
@@ -10045,6 +10063,22 @@ class XianyuSliderStealth:
             to_visit.extend(parent_map.get(pid, []))
         return ordered
 
+    def _remember_browser_process(self, runtime_obj) -> None:
+        self._browser_pid = self._extract_browser_pid(runtime_obj)
+        self._windows_browser_process_tree = None
+        self._get_windows_browser_process_tree(snapshot=True)
+
+    def _get_windows_browser_process_tree(self, *, snapshot: bool = False) -> Optional[PlaywrightProcessTree]:
+        pid = self._browser_pid
+        if os.name != "nt" or not pid:
+            return None
+        tree = getattr(self, "_windows_browser_process_tree", None)
+        if tree is None or tree.pid != pid:
+            tree = self._windows_browser_process_tree = PlaywrightProcessTree(pid, self.pure_user_id)
+        if snapshot:
+            tree.snapshot()
+        return tree
+
     def _force_kill_browser_process_tree(self, reason: str = "") -> bool:
         """兜底终止浏览器进程树，用于 close 失败或页面崩溃后的残留清理。"""
         pid = self._browser_pid
@@ -10053,6 +10087,14 @@ class XianyuSliderStealth:
 
         reason_suffix = f"（{reason}）" if reason else ""
         try:
+            if os.name == "nt":
+                tree = self._get_windows_browser_process_tree()
+                cleaned = tree is not None and tree.force_cleanup(reason)
+                if cleaned and self._windows_browser_process_tree is tree:
+                    self._browser_pid = None
+                    self._windows_browser_process_tree = None
+                return cleaned
+
             process_tree = self._collect_process_tree(int(pid))
             if not process_tree:
                 return False
@@ -10061,7 +10103,12 @@ class XianyuSliderStealth:
                 f"【{self.pure_user_id}】开始兜底清理浏览器进程树{reason_suffix}: {process_tree}"
             )
 
-            for signal_name, sig in (("TERM", signal.SIGTERM), ("KILL", signal.SIGKILL)):
+            sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+            signals = (("TERM", signal.SIGTERM),) if sig_kill == signal.SIGTERM else (
+                ("TERM", signal.SIGTERM),
+                ("KILL", sig_kill),
+            )
+            for signal_name, sig in signals:
                 for proc_pid in process_tree:
                     try:
                         os.kill(proc_pid, sig)
@@ -10099,6 +10146,8 @@ class XianyuSliderStealth:
         close_watchdog.start()
 
         try:
+            # 在 Playwright 停止前记录进程，driver 退出后仍能清理已记录的子进程。
+            self._get_windows_browser_process_tree(snapshot=True)
             # 清理页面 / 上下文 / 浏览器：跨线程 greenlet 错误由 _safe_pw_dispose 统一吸收
             self._safe_pw_dispose('页面', getattr(self, 'page', None), action='close')
             self.page = None
@@ -11147,7 +11196,68 @@ class XianyuSliderStealth:
     
     def login_with_password_playwright(self, account: str, password: str, show_browser: bool = False,
                                       notification_callback: Optional[Callable] = None,
-                                      force_clean_context: bool = False) -> dict:
+                                      force_clean_context: bool = False) -> Optional[dict]:
+        """登录与关闭由同一线程执行；调用方只对收尾阶段设等待上限。"""
+        runtime = _PasswordLoginRuntime()
+        outcome = Future()
+
+        def run_on_playwright_thread():
+            try:
+                outcome.set_result(self._login_with_password_playwright(
+                    account, password, show_browser, notification_callback, force_clean_context, runtime
+                ))
+            except BaseException as exc:
+                outcome.set_exception(exc)
+            finally:
+                self._close_password_login_runtime(runtime)
+
+        worker = threading.Thread(
+            target=run_on_playwright_thread, name=f"pwd-login-owner-{self.pure_user_id}", daemon=True
+        )
+        try:
+            worker.start()
+            try:
+                return outcome.result()
+            finally:
+                worker.join(timeout=_PASSWORD_LOGIN_CLOSE_TIMEOUT)
+                if worker.is_alive():
+                    logger.warning(f"【{self.pure_user_id}】密码登录浏览器关闭超时，会话先行收尾")
+                    tree = runtime.process_tree
+                    if tree is not None:
+                        try:
+                            threading.Thread(
+                                target=tree.force_cleanup,
+                                args=("password_login_close_timeout",),
+                                name=f"pwd-login-kill-{self.pure_user_id}",
+                                daemon=True,
+                            ).start()
+                        except RuntimeError as exc:
+                            logger.warning(f"【{self.pure_user_id}】无法启动密码登录进程清理: {exc}")
+        finally:
+            self._release_concurrency_slot("密码登录结束")
+
+    def _close_password_login_runtime(self, runtime: _PasswordLoginRuntime) -> None:
+        """只在创建 Playwright 的线程调用；超时线程只处理独立的 OS 进程快照。"""
+        tree = runtime.process_tree
+        if tree is not None:
+            tree.snapshot()
+        try:
+            for resource, action in (
+                (runtime.context, "close"), (runtime.browser, "close"), (runtime.playwright, "stop")
+            ):
+                if resource is None:
+                    continue
+                try:
+                    getattr(resource, action)()
+                except Exception as exc:
+                    logger.warning(f"【{self.pure_user_id}】密码登录关闭 {type(resource).__name__}.{action} 失败: {exc}")
+        finally:
+            if tree is not None:
+                tree.force_cleanup("password_login_close")
+
+    def _login_with_password_playwright(self, account: str, password: str, show_browser: bool,
+                                       notification_callback: Optional[Callable], force_clean_context: bool,
+                                       runtime: _PasswordLoginRuntime) -> Optional[dict]:
         """使用Playwright进行密码登录（新方法，替代DrissionPage）
         
         Args:
@@ -11259,8 +11369,10 @@ class XianyuSliderStealth:
                 self._ensure_project_playwright_browser()
 
             playwright_factory = self._get_sync_playwright_factory()
-            playwright = playwright_factory().start()
-            self._playwright_thread_id = threading.get_ident()
+            runtime.playwright = playwright = playwright_factory().start()
+            driver_pid = self._extract_browser_pid(None, playwright)
+            if driver_pid:
+                runtime.process_tree = PlaywrightProcessTree(driver_pid, self.pure_user_id)
             browser = None
             used_profile_lock_fallback = False
             launch_options: Dict[str, Any] = {
@@ -11312,9 +11424,16 @@ class XianyuSliderStealth:
             effective_clean_context = force_clean_context or used_profile_lock_fallback
             logger.info(f"【{self.pure_user_id}】已设置浏览器语言为中文（zh-CN）")
 
+            runtime.context = context
+            runtime.browser = browser if effective_clean_context else None
             if not browser:
                 browser = context.browser
-            self._browser_pid = self._extract_browser_pid(browser or context, playwright)
+            if runtime.process_tree is None:
+                pid = self._extract_browser_pid(browser or context, playwright)
+                if pid:
+                    runtime.process_tree = PlaywrightProcessTree(pid, self.pure_user_id)
+            if runtime.process_tree is not None:
+                runtime.process_tree.snapshot()
             page = context.new_page()
             self._apply_headless_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}
@@ -11366,6 +11485,8 @@ class XianyuSliderStealth:
 
             logger.info(f"【{self.pure_user_id}】浏览器已成功启动（{browser_mode}模式，画像: {self.profile_id}）")
 
+            original_playwright_thread_id = getattr(self, '_playwright_thread_id', None)
+            self._playwright_thread_id = threading.get_ident()
             try:
                 # 预访问：先访问闲鱼首页建立正常浏览历史（降低空白浏览器的风控风险）
                 try:
@@ -12184,56 +12305,7 @@ class XianyuSliderStealth:
                     self.playwright = original_playwright
             
             finally:
-                # 关闭浏览器。这里不能无限阻塞，否则上层会话会一直卡在 processing。
-                try:
-                    close_errors = []
-
-                    def _close_runtime_resources():
-                        try:
-                            if context:
-                                context.close()
-                        except Exception as close_context_err:
-                            close_errors.append(f"context.close: {close_context_err}")
-
-                        if effective_clean_context and browser:
-                            try:
-                                browser.close()
-                            except Exception as close_browser_err:
-                                close_errors.append(f"browser.close: {close_browser_err}")
-
-                        try:
-                            if playwright:
-                                playwright.stop()
-                        except Exception as stop_playwright_err:
-                            close_errors.append(f"playwright.stop: {stop_playwright_err}")
-
-                    close_thread = threading.Thread(
-                        target=_close_runtime_resources,
-                        name=f"pwd-login-close-{self.pure_user_id}",
-                        daemon=True,
-                    )
-                    close_thread.start()
-                    close_thread.join(timeout=8)
-
-                    if close_thread.is_alive():
-                        logger.warning(f"【{self.pure_user_id}】关闭浏览器超时，改为后台继续清理，避免阻塞密码登录会话收尾")
-                        self._force_kill_browser_process_tree("password_login_close_timeout")
-                    elif close_errors:
-                        logger.warning(f"【{self.pure_user_id}】关闭浏览器时出现异常: {close_errors}")
-                        self._force_kill_browser_process_tree("password_login_close_error")
-                    elif effective_clean_context:
-                        logger.info(f"【{self.pure_user_id}】浏览器已关闭，干净上下文已销毁")
-                    else:
-                        logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
-                        self._browser_pid = None
-                except Exception as e:
-                    logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
-
-                # 释放并发槽位（防止槽位泄漏导致后续任务永远等待）
-                try:
-                    self._release_concurrency_slot("密码登录结束")
-                except Exception as e:
-                    logger.warning(f"【{self.pure_user_id}】释放并发槽位时出错: {e}")
+                self._playwright_thread_id = original_playwright_thread_id
         
         except Exception as e:
             logger.error(f"【{self.pure_user_id}】密码登录流程异常: {e}")
@@ -12249,11 +12321,6 @@ class XianyuSliderStealth:
             self._slider_refresh_mode = previous_slider_refresh_mode
             self._password_slider_runtime_hardened = False
             self.risk_trigger_scene = previous_risk_trigger_scene
-            # 最外层 finally：确保任何退出路径都释放并发槽位
-            try:
-                self._release_concurrency_slot("密码登录finally兜底")
-            except Exception:
-                pass
     
     def login_with_password_headful(self, account: str = None, password: str = None, show_browser: bool = False):
         """通过浏览器进行密码登录并获取Cookie (使用DrissionPage)

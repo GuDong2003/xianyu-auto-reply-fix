@@ -1,0 +1,42 @@
+name: Windows Playwright cleanup
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-playwright-cleanup.yml'
+      - 'requirements.txt'
+      - 'tests/test_win_playwright_cleanup.py'
+      - 'utils/playwright_cleanup.py'
+      - 'utils/xianyu_slider_stealth.py'
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Windows Playwright cleanup
+    runs-on: windows-latest
+    timeout-minutes: 12
+    env:
+      XIANYU_PLAYWRIGHT_CLEANUP_SMOKE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: |
+          $deps = Get-Content requirements.txt | Where-Object { $_ -match '^(playwright|psutil|loguru|requests|PyYAML)[<=>]' }
+          python -m pip install $deps
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - name: Install Chromium headless shell and verify resource cleanup
+        run: |
+          $env:PLAYWRIGHT_NODEJS_PATH = (Get-Command node.exe).Source
+          python -m playwright install chromium --only-shell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest tests/test_win_playwright_cleanup.py tests/test_slider_handler_close.py -v
